@@ -1,0 +1,63 @@
+const express = require('express')
+const { requireAdmin } = require('../middleware/authAdmin')
+const { requireCustomer } = require('../middleware/authCustomer')
+const { asyncHandler } = require('../Controller/helpers/asyncHandler')
+const productController = require('../Controller/productController')
+const userController = require('../Controller/userController')
+
+const router = express.Router()
+
+router.get('/health', (_req, res) => {
+  res.json({ ok: true })
+})
+
+router.get('/categories', asyncHandler(productController.listCategories))
+router.get('/products', asyncHandler(productController.listPublishedProducts))
+router.get('/products/:id', asyncHandler(productController.getPublishedProductById))
+router.get('/merchandising/new-arrivals', asyncHandler(productController.listPublicNewArrivalIds))
+
+router.post('/auth/register', asyncHandler(userController.customerRegister))
+router.post('/auth/login', asyncHandler(userController.customerLogin))
+router.get('/auth/me', requireCustomer, asyncHandler(userController.customerGetMe))
+router.patch('/auth/me', requireCustomer, asyncHandler(userController.customerUpdateMe))
+router.get('/auth/orders', requireCustomer, asyncHandler(userController.customerListOrders))
+
+router.post('/orders', requireCustomer, asyncHandler(userController.customerPlaceOrder))
+
+router.post('/admin/auth/login', asyncHandler(userController.adminLogin))
+
+const admin = express.Router()
+admin.use(requireAdmin)
+
+admin.get('/products', asyncHandler(productController.adminListProducts))
+admin.post('/products', asyncHandler(productController.adminCreateProduct))
+admin.patch('/products/:id', asyncHandler(productController.adminUpdateProduct))
+admin.delete('/products/:id', asyncHandler(productController.adminDeleteProduct))
+
+admin.get('/categories', asyncHandler(productController.adminListCategories))
+admin.put('/categories', asyncHandler(productController.adminReplaceCategories))
+
+admin.get('/merchandising/new-arrivals', asyncHandler(productController.adminListNewArrivalIds))
+admin.put('/merchandising/new-arrivals', asyncHandler(productController.adminSaveNewArrivalIds))
+
+admin.get('/orders', asyncHandler(userController.adminListOrders))
+admin.get('/orders/:id', asyncHandler(userController.adminGetOrder))
+admin.patch('/orders/:id', asyncHandler(userController.adminPatchOrder))
+
+admin.get('/users', asyncHandler(userController.adminListUsers))
+admin.patch('/users/:id', asyncHandler(userController.adminPatchUserDisabled))
+
+router.use('/admin', admin)
+
+router.use((err, _req, res, _next) => {
+  console.error(err)
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({ message: err.message })
+  }
+  if (err.name === 'CastError') {
+    return res.status(400).json({ message: 'Invalid id' })
+  }
+  res.status(500).json({ message: err.message || 'Server error' })
+})
+
+module.exports = router
