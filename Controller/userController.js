@@ -4,9 +4,15 @@ const jwt = require('jsonwebtoken')
 const Admin = require('../Models/Admin')
 const Customer = require('../Models/Customer')
 const Order = require('../Models/Order')
+const PasswordResetOtp = require('../Models/PasswordResetOtp')
+const { sendPasswordResetOtpEmail } = require('./helpers/otpEmail')
 const { isValidObjectId } = require('./helpers/mongoIds')
 
 const MIN_PASSWORD_LEN = 8
+const OTP_LENGTH = 6
+const OTP_EXPIRY_MINUTES = 10
+const OTP_MAX_ATTEMPTS = 5
+const RESET_TOKEN_EXPIRY = '10m'
 
 function customerPublicJson(doc) {
   const o = doc.toJSON()
@@ -26,6 +32,22 @@ function signCustomerToken(customer, secret) {
     secret,
     { expiresIn: '7d' }
   )
+}
+
+function normalizeEmail(v) {
+  return String(v || '')
+    .toLowerCase()
+    .trim()
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+function createNumericOtp() {
+  const min = 10 ** (OTP_LENGTH - 1)
+  const max = 10 ** OTP_LENGTH
+  return String(Math.floor(Math.random() * (max - min)) + min)
 }
 
 // --- storefront customer auth ---
@@ -102,6 +124,131 @@ async function customerLogin(req, res) {
   }
   const token = signCustomerToken(customer, secret)
   res.json({ token, user: customerPublicJson(customer) })
+}
+
+async function customerForgotPasswordRequest(req, res) {
+  const email = normalizeEmail(req.body?.email)
+  if (!email || !isValidEmail(email)) {
+    return res.status(400).json({ message: 'Valid email required' })
+  }
+
+  const customer = await Customer.findOne({ email }).select('_id email disabled')
+  if (!customer || customer.disabled) {
+    return res.json({
+      message: 'If an account exists for this email, an OTP has been sent.',
+    })
+  }
+
+  const otp = createNumericOtp()
+  const otpHash = await bcrypt.hash(otp, 10)
+  const expiresAt = new Date(Date.now() + OTP_EXPIRY_MINUTES * 60 * 1000)
+
+  await PasswordResetOtp.findOneAndUpdate(
+    { email },
+    { $set: { otpHash, expiresAt, attempts: 0 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  )
+
+  await sendPasswordResetOtpEmail({
+    to: email,
+    otp,
+    expiresInMinutes: OTP_EXPIRY_MINUTES,
+  })
+
+  res.json({
+    message: 'If an account exists for this email, an OTP has been sent.',
+  })
+}
+
+async function customerForgotPasswordVerifyOtp(req, res) {
+  const secret = process.env.JWT_SECRET
+  if (!secret) {
+    return res.status(500).json({ message: 'Server missing JWT_SECRET' })
+  }
+  const email = normalizeEmail(req.body?.email)
+  const otp = String(req.body?.otp || '').trim()
+  if (!email || !isValidEmail(email)) {
+    return res.status(400).json({ message: 'Valid email required' })
+  }
+  if (!otp || otp.length !== OTP_LENGTH || !/^\d+$/.test(otp)) {
+    return res.status(400).json({ message: `OTP must be ${OTP_LENGTH} digits` })
+  }
+
+  const customer = await Customer.findOne({ email }).select('_id email disabled')
+  if (!customer || customer.disabled) {
+    return res.status(400).json({ message: 'Invalid or expired OTP' })
+  }
+
+  const otpDoc = await PasswordResetOtp.findOne({ email }).select('+otpHash')
+  if (!otpDoc || otpDoc.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ message: 'Invalid or expired OTP' })
+  }
+  if (otpDoc.attempts >= OTP_MAX_ATTEMPTS) {
+    await PasswordResetOtp.deleteOne({ _id: otpDoc._id })
+    return res.status(429).json({ message: 'Too many invalid OTP attempts. Please request a new OTP.' })
+  }
+
+  const ok = await bcrypt.compare(otp, otpDoc.otpHash)
+  if (!ok) {
+    otpDoc.attempts += 1
+    await otpDoc.save()
+    return res.status(400).json({ message: 'Invalid or expired OTP' })
+  }
+
+  const resetToken = jwt.sign(
+    {
+      role: 'customer-password-reset',
+      sub: String(customer._id),
+      email,
+      otpId: String(otpDoc._id),
+    },
+    secret,
+    { expiresIn: RESET_TOKEN_EXPIRY }
+  )
+
+  res.json({ resetToken, expiresIn: RESET_TOKEN_EXPIRY })
+}
+
+async function customerForgotPasswordReset(req, res) {
+  const secret = process.env.JWT_SECRET
+  if (!secret) {
+    return res.status(500).json({ message: 'Server missing JWT_SECRET' })
+  }
+  const resetToken = String(req.body?.resetToken || '')
+  const newPassword = String(req.body?.newPassword || '')
+  if (!resetToken) {
+    return res.status(400).json({ message: 'resetToken required' })
+  }
+  if (newPassword.length < MIN_PASSWORD_LEN) {
+    return res.status(400).json({ message: `Password must be at least ${MIN_PASSWORD_LEN} characters` })
+  }
+
+  let payload
+  try {
+    payload = jwt.verify(resetToken, secret)
+  } catch {
+    return res.status(401).json({ message: 'Invalid or expired reset token' })
+  }
+
+  if (payload?.role !== 'customer-password-reset' || !payload?.sub || !payload?.email || !payload?.otpId) {
+    return res.status(401).json({ message: 'Invalid reset token' })
+  }
+
+  const customer = await Customer.findById(payload.sub).select('+passwordHash')
+  if (!customer || customer.disabled || normalizeEmail(customer.email) !== normalizeEmail(payload.email)) {
+    return res.status(404).json({ message: 'User not found' })
+  }
+
+  const otpDoc = await PasswordResetOtp.findOne({ _id: payload.otpId, email: normalizeEmail(payload.email) })
+  if (!otpDoc || otpDoc.expiresAt.getTime() < Date.now()) {
+    return res.status(400).json({ message: 'Reset session expired. Please request a new OTP.' })
+  }
+
+  customer.passwordHash = await bcrypt.hash(newPassword, 10)
+  await customer.save()
+  await PasswordResetOtp.deleteMany({ email: normalizeEmail(payload.email) })
+
+  res.json({ message: 'Password reset successful. Please log in with your new password.' })
 }
 
 async function customerGetMe(req, res) {
@@ -331,6 +478,9 @@ async function adminPatchOrder(req, res) {
 module.exports = {
   customerRegister,
   customerLogin,
+  customerForgotPasswordRequest,
+  customerForgotPasswordVerifyOtp,
+  customerForgotPasswordReset,
   customerGetMe,
   customerUpdateMe,
   customerPlaceOrder,

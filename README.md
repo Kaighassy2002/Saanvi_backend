@@ -6,7 +6,7 @@ Express REST API for the SAANVI jewellery storefront and admin panel. Data lives
 
 - **Node.js** · **Express 5**
 - **MongoDB** via **Mongoose**
-- **bcryptjs** (passwords) · **jsonwebtoken** · **cors** · **dotenv**
+- **bcryptjs** (passwords) · **jsonwebtoken** · **nodemailer** · **cors** · **dotenv**
 
 ## Prerequisites
 
@@ -33,6 +33,9 @@ cp .env.example .env
 | `PORT` | No | HTTP port (default **5000**) |
 | `ADMIN_EMAIL` | No | Seed admin login email (default `admin@jewellery.com`) |
 | `ADMIN_PASSWORD` | No | Seed admin password (default `admin123`) |
+| `GMAIL_USER` | Cond. | Gmail address used to send OTP emails |
+| `GMAIL_APP_PASSWORD` | Cond. | Gmail app password (not your normal account password) |
+| `MAIL_FROM` | No | Optional sender address/display, defaults to `GMAIL_USER` |
 
 > **Security:** Change `ADMIN_EMAIL` / `ADMIN_PASSWORD` and use a strong `JWT_SECRET` in production. Never commit `.env`.
 
@@ -66,6 +69,9 @@ All JSON routes are under **`/api`**.
 |--------|------|------|---------|
 | `POST` | `/auth/register` | — | Register |
 | `POST` | `/auth/login` | — | Login → JWT |
+| `POST` | `/auth/forgot-password/request` | — | Send OTP to email via Gmail |
+| `POST` | `/auth/forgot-password/verify` | — | Verify OTP and return short-lived reset token |
+| `POST` | `/auth/forgot-password/reset` | — | Reset password using reset token |
 | `GET` | `/auth/me` | Customer | Current profile |
 | `PATCH` | `/auth/me` | Customer | Update profile |
 | `GET` | `/auth/orders` | Customer | Orders for this account (by user id or email) |

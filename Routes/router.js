@@ -18,6 +18,9 @@ router.get('/merchandising/new-arrivals', asyncHandler(productController.listPub
 
 router.post('/auth/register', asyncHandler(userController.customerRegister))
 router.post('/auth/login', asyncHandler(userController.customerLogin))
+router.post('/auth/forgot-password/request', asyncHandler(userController.customerForgotPasswordRequest))
+router.post('/auth/forgot-password/verify', asyncHandler(userController.customerForgotPasswordVerifyOtp))
+router.post('/auth/forgot-password/reset', asyncHandler(userController.customerForgotPasswordReset))
 router.get('/auth/me', requireCustomer, asyncHandler(userController.customerGetMe))
 router.patch('/auth/me', requireCustomer, asyncHandler(userController.customerUpdateMe))
 router.get('/auth/orders', requireCustomer, asyncHandler(userController.customerListOrders))
