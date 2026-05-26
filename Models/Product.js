@@ -3,6 +3,7 @@ const mongoose = require('mongoose')
 const specificationsSchema = new mongoose.Schema(
   {
     material: { type: String, default: '' },
+    color: { type: String, default: '' },
     weight: { type: String, default: '' },
     length: { type: String, default: '' },
     certification: { type: String, default: '' },
@@ -45,6 +46,7 @@ function toClientProduct(doc) {
     description: plain.description || '',
     specifications: plain.specifications || {
       material: '',
+      color: '',
       weight: '',
       length: '',
       certification: '',

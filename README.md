@@ -1,6 +1,6 @@
-# SAANVI — Jewellery API
+# Aashmika Designs — Jewellery API
 
-Express REST API for the SAANVI jewellery storefront and admin panel. Data lives in **MongoDB** (Mongoose). Customer and admin actions use **JWT** authentication.
+Express REST API for the Aashmika Designs jewellery storefront and admin panel. Data lives in **MongoDB** (Mongoose). Customer and admin actions use **JWT** authentication.
 
 ## Stack
 
@@ -36,6 +36,10 @@ cp .env.example .env
 | `GMAIL_USER` | Cond. | Gmail address used to send OTP emails |
 | `GMAIL_APP_PASSWORD` | Cond. | Gmail app password (not your normal account password) |
 | `MAIL_FROM` | No | Optional sender address/display, defaults to `GMAIL_USER` |
+| `CLOUDINARY_CLOUD_NAME` | Cond. | Cloudinary cloud name (admin product image uploads) |
+| `CLOUDINARY_API_KEY` | Cond. | Cloudinary API key |
+| `CLOUDINARY_API_SECRET` | Cond. | Cloudinary API secret (server only; never expose to the browser) |
+| `CLOUDINARY_FOLDER` | No | Upload folder in Cloudinary (default `jewellery/products`) |
 
 > **Security:** Change `ADMIN_EMAIL` / `ADMIN_PASSWORD` and use a strong `JWT_SECRET` in production. Never commit `.env`.
 
@@ -89,6 +93,7 @@ Login: `POST /api/admin/auth/login` (body uses admin credentials from your DB / 
 | Area | Examples |
 |------|----------|
 | Products | `GET/POST /admin/products`, `PATCH/DELETE /admin/products/:id` |
+| Uploads | `GET /admin/upload/cloudinary-signature` — signed params for direct browser upload to Cloudinary |
 | Categories | `GET /admin/categories`, `PUT /admin/categories` |
 | Merchandising | `GET/PUT /admin/merchandising/new-arrivals` |
 | Orders | `GET /admin/orders`, `GET/PATCH /admin/orders/:id` (id = order `publicId`) |

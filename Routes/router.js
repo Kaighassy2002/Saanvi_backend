@@ -4,6 +4,9 @@ const { requireCustomer } = require('../middleware/authCustomer')
 const { asyncHandler } = require('../Controller/helpers/asyncHandler')
 const productController = require('../Controller/productController')
 const userController = require('../Controller/userController')
+const reviewController = require('../Controller/reviewController')
+const uploadController = require('../Controller/uploadController')
+const { optionalCustomer } = require('../middleware/optionalCustomer')
 
 const router = express.Router()
 
@@ -13,7 +16,18 @@ router.get('/health', (_req, res) => {
 
 router.get('/categories', asyncHandler(productController.listCategories))
 router.get('/products', asyncHandler(productController.listPublishedProducts))
+router.get('/products/reviews/summaries', asyncHandler(reviewController.reviewSummaries))
 router.get('/products/:id', asyncHandler(productController.getPublishedProductById))
+router.get(
+  '/products/:id/reviews',
+  optionalCustomer,
+  asyncHandler(reviewController.listProductReviews)
+)
+router.post(
+  '/products/:id/reviews',
+  requireCustomer,
+  asyncHandler(reviewController.createProductReview)
+)
 router.get('/merchandising/new-arrivals', asyncHandler(productController.listPublicNewArrivalIds))
 
 router.post('/auth/register', asyncHandler(userController.customerRegister))
@@ -32,6 +46,8 @@ router.post('/admin/auth/login', asyncHandler(userController.adminLogin))
 const admin = express.Router()
 admin.use(requireAdmin)
 
+admin.get('/upload/cloudinary-signature', asyncHandler(uploadController.adminGetCloudinarySignature))
+
 admin.get('/products', asyncHandler(productController.adminListProducts))
 admin.post('/products', asyncHandler(productController.adminCreateProduct))
 admin.patch('/products/:id', asyncHandler(productController.adminUpdateProduct))
@@ -49,6 +65,10 @@ admin.patch('/orders/:id', asyncHandler(userController.adminPatchOrder))
 
 admin.get('/users', asyncHandler(userController.adminListUsers))
 admin.patch('/users/:id', asyncHandler(userController.adminPatchUserDisabled))
+
+admin.get('/reviews', asyncHandler(reviewController.adminListReviews))
+admin.patch('/reviews/:id', asyncHandler(reviewController.adminPatchReview))
+admin.delete('/reviews/:id', asyncHandler(reviewController.adminDeleteReview))
 
 router.use('/admin', admin)
 
