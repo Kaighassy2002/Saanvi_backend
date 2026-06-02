@@ -31,9 +31,6 @@ async function clearAllProducts() {
   console.log(`Deleted ${reviewResult.deletedCount} review(s)`)
   console.log(`Deleted ${stockResult.deletedCount} stock movement(s)`)
   console.log('Cleared product IDs from site settings and collections')
-  console.log(
-    'Tip: set SEED_PRODUCTS=false in .env before restarting the server so dummy products are not re-added.'
-  )
 }
 
 clearAllProducts()

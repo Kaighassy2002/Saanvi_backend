@@ -49,7 +49,7 @@ cp .env.example .env
 npm start
 ```
 
-Server listens on `PORT` (default `http://localhost:5000`). On startup it connects to MongoDB and runs **seed logic** if collections need initial data (including the admin user from env defaults).
+Server listens on `PORT` (default `http://localhost:5000`). On startup it connects to MongoDB and ensures baseline setup data (admin user + site settings).
 
 - **Root:** `GET /` — simple HTML status message  
 - **Health:** `GET /api/health` → `{ "ok": true }`
@@ -88,7 +88,7 @@ All JSON routes are under **`/api`**.
 
 ### Admin (`Authorization: Bearer <admin JWT>`)
 
-Login: `POST /api/admin/auth/login` (body uses admin credentials from your DB / seed).
+Login: `POST /api/admin/auth/login` (body uses admin credentials from your DB).
 
 | Area | Examples |
 |------|----------|
@@ -109,7 +109,7 @@ jewellery_backend/
 ├── Controller/           # Handlers (products, users, admin)
 ├── Models/               # Mongoose schemas
 ├── middleware/           # JWT: admin, customer, optional customer
-└── seed/                 # seedIfNeeded — admin, sample data if empty
+└── seed/                 # baseline setup helpers (admin + site settings)
 ```
 
 ## Troubleshooting

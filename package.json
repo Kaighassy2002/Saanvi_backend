@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node index.js",
     "test": "node index.js",
-    "seed:products": "node seed/seedProducts.js",
     "clear:products": "node seed/clearProducts.js"
   },
   "keywords": [],
