@@ -480,26 +480,31 @@ async function seedIfNeeded() {
     settings = await SiteSettings.create({
       categories: [...DEFAULT_CATEGORIES],
       newArrivalProductIds: [],
+      shippingFee: Number(process.env.SHIPPING_FEE || 99),
+      freeShippingThreshold: Number(process.env.FREE_SHIPPING_THRESHOLD || 2999),
     })
     console.log('Seeded site settings')
   }
 
-  const existingProducts = await Product.find().select('name')
-  const existingNames = new Set(
-    existingProducts.map((p) => String(p.name || '').trim().toLowerCase()).filter(Boolean)
-  )
-  const missingSeedProducts = SEED_PRODUCTS.filter(
-    (p) => !existingNames.has(String(p.name || '').trim().toLowerCase())
-  )
-  if (missingSeedProducts.length > 0) {
-    const inserted = await Product.insertMany(missingSeedProducts)
-    console.log('Seeded products:', inserted.length)
-  }
+  const skipProductSeed = process.env.SEED_PRODUCTS === 'false'
+  if (!skipProductSeed) {
+    const existingProducts = await Product.find().select('name')
+    const existingNames = new Set(
+      existingProducts.map((p) => String(p.name || '').trim().toLowerCase()).filter(Boolean)
+    )
+    const missingSeedProducts = SEED_PRODUCTS.filter(
+      (p) => !existingNames.has(String(p.name || '').trim().toLowerCase())
+    )
+    if (missingSeedProducts.length > 0) {
+      const inserted = await Product.insertMany(missingSeedProducts)
+      console.log('Seeded products:', inserted.length)
+    }
 
-  if (settings.newArrivalProductIds.length === 0) {
-    const first = await Product.find().limit(6).select('_id')
-    settings.newArrivalProductIds = first.map((p) => String(p._id))
-    await settings.save()
+    if (settings.newArrivalProductIds.length === 0) {
+      const first = await Product.find().limit(6).select('_id')
+      settings.newArrivalProductIds = first.map((p) => String(p._id))
+      await settings.save()
+    }
   }
 
   if ((await Customer.countDocuments()) === 0) {

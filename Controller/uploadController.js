@@ -5,6 +5,9 @@ const {
   getUploadFolder,
 } = require('../config/cloudinary')
 
+/** 4:5 product master — must match jewellery_frontend/src/utils/cloudinaryImage.js */
+const PRODUCT_UPLOAD_TRANSFORM = 'c_pad,w_1200,h_1500,b_rgb:f8f2e7,f_auto,q_auto'
+
 async function adminGetCloudinarySignature(_req, res) {
   if (!isCloudinaryConfigured()) {
     return res.status(503).json({
@@ -16,7 +19,11 @@ async function adminGetCloudinarySignature(_req, res) {
 
   const timestamp = Math.round(Date.now() / 1000)
   const folder = getUploadFolder()
-  const paramsToSign = { timestamp, folder }
+  const paramsToSign = {
+    timestamp,
+    folder,
+    transformation: PRODUCT_UPLOAD_TRANSFORM,
+  }
   const signature = cloudinary.utils.api_sign_request(
     paramsToSign,
     process.env.CLOUDINARY_API_SECRET
@@ -26,6 +33,7 @@ async function adminGetCloudinarySignature(_req, res) {
     signature,
     timestamp,
     folder,
+    transformation: PRODUCT_UPLOAD_TRANSFORM,
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
     apiKey: process.env.CLOUDINARY_API_KEY,
   })

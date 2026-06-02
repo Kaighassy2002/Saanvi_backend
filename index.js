@@ -1,4 +1,4 @@
-require('dotenv').config()
+require('dotenv').config({ override: true })
 const express = require('express')
 const cors = require('cors')
 const { connectDb } = require('./DB/connection')
@@ -6,7 +6,31 @@ const apiRouter = require('./Routes/router')
 
 const app = express()
 
-app.use(cors())
+function allowedOriginsFromEnv() {
+  const raw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim()
+  if (!raw) return []
+  return raw
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean)
+}
+
+const allowedOrigins = allowedOriginsFromEnv()
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true)
+      if (allowedOrigins.length === 0) {
+        if (origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') {
+          return cb(null, true)
+        }
+        return cb(new Error('CORS blocked for origin'))
+      }
+      if (allowedOrigins.includes(origin)) return cb(null, true)
+      return cb(new Error('CORS blocked for origin'))
+    },
+  })
+)
 app.use(express.json())
 app.use('/api', apiRouter)
 
@@ -19,6 +43,7 @@ app.get('/', (_req, res) => {
 })
 
 connectDb()
+  .then(() => require('./DB/ensureIndexes').ensureIndexes())
   .then(() => require('./seed/seedIfNeeded')())
   .then(() => {
     app.listen(PORT, () => {

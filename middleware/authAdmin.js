@@ -13,7 +13,8 @@ function requireAdmin(req, res, next) {
   try {
     const payload = jwt.verify(token, secret)
     const role = String(payload.role || '').toLowerCase()
-    if (role !== 'admin' && role !== 'superadmin') {
+    const allowed = ['admin', 'superadmin', 'owner', 'catalog', 'fulfillment', 'support']
+    if (!allowed.includes(role)) {
       return res.status(403).json({ message: 'Forbidden' })
     }
     req.admin = payload

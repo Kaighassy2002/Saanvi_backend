@@ -43,7 +43,35 @@ async function sendPasswordResetOtpEmail({ to, otp, expiresInMinutes }) {
   })
 }
 
+async function sendOrderConfirmationEmail({ to, orderId, customerName, total, itemCount }) {
+  const { from } = mailConfig()
+  if (!isMailConfigured()) return false
+  const transporter = makeTransporter()
+  const safeName = String(customerName || 'Customer').trim() || 'Customer'
+  const safeOrderId = String(orderId || '').trim() || 'your order'
+  const amount = Number(total || 0).toLocaleString('en-IN')
+  const count = Math.max(0, Number(itemCount || 0))
+  await transporter.sendMail({
+    from,
+    to,
+    subject: `Order confirmed: ${safeOrderId}`,
+    text: `Hi ${safeName}, your order ${safeOrderId} has been placed successfully. Items: ${count}. Total: INR ${amount}. Our team will share shipping updates soon.`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
+        <h2 style="margin:0 0 12px;">Thanks for shopping with Aashmika Designs</h2>
+        <p style="margin:0 0 8px;">Hi ${safeName}, your order has been placed successfully.</p>
+        <p style="margin:0 0 6px;"><strong>Order ID:</strong> ${safeOrderId}</p>
+        <p style="margin:0 0 6px;"><strong>Items:</strong> ${count}</p>
+        <p style="margin:0 0 12px;"><strong>Total:</strong> INR ${amount}</p>
+        <p style="margin:0;">We will send tracking details once your order is dispatched.</p>
+      </div>
+    `,
+  })
+  return true
+}
+
 module.exports = {
   isMailConfigured,
   sendPasswordResetOtpEmail,
+  sendOrderConfirmationEmail,
 }

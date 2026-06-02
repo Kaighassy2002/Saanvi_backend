@@ -136,9 +136,27 @@ async function reviewSummaries(req, res) {
   res.json({ summaries: byProduct })
 }
 
-async function adminListReviews(_req, res) {
-  const docs = await Review.find().sort({ createdAt: -1 }).limit(200)
+async function adminListReviews(req, res) {
+  const filter = {}
+  if (req.query.status) filter.status = String(req.query.status)
+  if (req.query.productId && isValidObjectId(req.query.productId)) {
+    filter.productId = String(req.query.productId)
+  }
+  const docs = await Review.find(filter).sort({ createdAt: -1 }).limit(500)
   res.json({ reviews: docs.map((d) => d.toJSON()) })
+}
+
+async function adminBulkReviews(req, res) {
+  const { ids, status } = req.body || {}
+  if (!Array.isArray(ids) || !ids.length) {
+    return res.status(400).json({ message: 'ids array required' })
+  }
+  if (!['approved', 'rejected', 'pending'].includes(status)) {
+    return res.status(400).json({ message: 'Invalid status' })
+  }
+  const validIds = ids.filter((id) => isValidObjectId(id))
+  const result = await Review.updateMany({ _id: { $in: validIds } }, { $set: { status } })
+  res.json({ modified: result.modifiedCount })
 }
 
 async function adminPatchReview(req, res) {
@@ -178,6 +196,7 @@ module.exports = {
   createProductReview,
   reviewSummaries,
   adminListReviews,
+  adminBulkReviews,
   adminPatchReview,
   adminDeleteReview,
 }

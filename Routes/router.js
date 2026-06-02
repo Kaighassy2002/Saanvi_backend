@@ -6,6 +6,16 @@ const productController = require('../Controller/productController')
 const userController = require('../Controller/userController')
 const reviewController = require('../Controller/reviewController')
 const uploadController = require('../Controller/uploadController')
+const settingsController = require('../Controller/settingsController')
+const paymentsController = require('../Controller/paymentsController')
+const dashboardController = require('../Controller/dashboardController')
+const inventoryController = require('../Controller/inventoryController')
+const categoryController = require('../Controller/categoryController')
+const collectionController = require('../Controller/collectionController')
+const analyticsController = require('../Controller/analyticsController')
+const stockController = require('../Controller/stockController')
+const sizeChartController = require('../Controller/sizeChartController')
+const couponController = require('../Controller/couponController')
 const { optionalCustomer } = require('../middleware/optionalCustomer')
 
 const router = express.Router()
@@ -29,6 +39,8 @@ router.post(
   asyncHandler(reviewController.createProductReview)
 )
 router.get('/merchandising/new-arrivals', asyncHandler(productController.listPublicNewArrivalIds))
+router.get('/store-settings', asyncHandler(settingsController.getPublicStoreSettings))
+router.get('/payments/razorpay-config', asyncHandler(paymentsController.getRazorpayConfig))
 
 router.post('/auth/register', asyncHandler(userController.customerRegister))
 router.post('/auth/login', asyncHandler(userController.customerLogin))
@@ -37,9 +49,15 @@ router.post('/auth/forgot-password/verify', asyncHandler(userController.customer
 router.post('/auth/forgot-password/reset', asyncHandler(userController.customerForgotPasswordReset))
 router.get('/auth/me', requireCustomer, asyncHandler(userController.customerGetMe))
 router.patch('/auth/me', requireCustomer, asyncHandler(userController.customerUpdateMe))
+router.get('/auth/cart', requireCustomer, asyncHandler(userController.customerGetCart))
+router.put('/auth/cart', requireCustomer, asyncHandler(userController.customerPutCart))
+router.get('/auth/wishlist', requireCustomer, asyncHandler(userController.customerGetWishlist))
+router.put('/auth/wishlist', requireCustomer, asyncHandler(userController.customerPutWishlist))
 router.get('/auth/orders', requireCustomer, asyncHandler(userController.customerListOrders))
 
 router.post('/orders', requireCustomer, asyncHandler(userController.customerPlaceOrder))
+router.post('/orders/razorpay-order', requireCustomer, asyncHandler(userController.createRazorpayOrder))
+router.post('/orders/razorpay-verify', requireCustomer, asyncHandler(userController.verifyRazorpayPayment))
 
 router.post('/admin/auth/login', asyncHandler(userController.adminLogin))
 
@@ -48,10 +66,28 @@ admin.use(requireAdmin)
 
 admin.get('/upload/cloudinary-signature', asyncHandler(uploadController.adminGetCloudinarySignature))
 
+admin.get('/dashboard/summary', asyncHandler(dashboardController.adminDashboardSummary))
+
 admin.get('/products', asyncHandler(productController.adminListProducts))
+admin.patch('/products/bulk', asyncHandler(productController.adminBulkProducts))
+admin.get('/products/:id', asyncHandler(productController.adminGetProduct))
 admin.post('/products', asyncHandler(productController.adminCreateProduct))
 admin.patch('/products/:id', asyncHandler(productController.adminUpdateProduct))
 admin.delete('/products/:id', asyncHandler(productController.adminDeleteProduct))
+
+admin.get('/inventory/low-stock', asyncHandler(inventoryController.adminLowStock))
+admin.post('/inventory/adjust', asyncHandler(stockController.adminAdjustStock))
+admin.get('/inventory/movements', asyncHandler(stockController.adminStockMovements))
+
+admin.get('/catalog/categories', asyncHandler(categoryController.adminListCategories))
+admin.post('/catalog/categories', asyncHandler(categoryController.adminCreateCategory))
+admin.patch('/catalog/categories/:id', asyncHandler(categoryController.adminUpdateCategory))
+admin.delete('/catalog/categories/:id', asyncHandler(categoryController.adminDeleteCategory))
+
+admin.get('/catalog/collections', asyncHandler(collectionController.adminListCollections))
+admin.post('/catalog/collections', asyncHandler(collectionController.adminCreateCollection))
+admin.patch('/catalog/collections/:id', asyncHandler(collectionController.adminUpdateCollection))
+admin.delete('/catalog/collections/:id', asyncHandler(collectionController.adminDeleteCollection))
 
 admin.get('/categories', asyncHandler(productController.adminListCategories))
 admin.put('/categories', asyncHandler(productController.adminReplaceCategories))
@@ -59,14 +95,36 @@ admin.put('/categories', asyncHandler(productController.adminReplaceCategories))
 admin.get('/merchandising/new-arrivals', asyncHandler(productController.adminListNewArrivalIds))
 admin.put('/merchandising/new-arrivals', asyncHandler(productController.adminSaveNewArrivalIds))
 
+admin.get('/settings', asyncHandler(settingsController.adminGetSettings))
+admin.put('/settings', asyncHandler(settingsController.adminUpdateSettings))
+admin.get('/shipping', asyncHandler(settingsController.adminGetShipping))
+admin.put('/shipping', asyncHandler(settingsController.adminUpdateShipping))
+
+admin.get('/analytics/sales', asyncHandler(analyticsController.adminSalesAnalytics))
+admin.get('/analytics/products', asyncHandler(analyticsController.adminProductAnalytics))
+
+admin.get('/orders/export', asyncHandler(userController.adminExportOrders))
 admin.get('/orders', asyncHandler(userController.adminListOrders))
 admin.get('/orders/:id', asyncHandler(userController.adminGetOrder))
 admin.patch('/orders/:id', asyncHandler(userController.adminPatchOrder))
 
 admin.get('/users', asyncHandler(userController.adminListUsers))
-admin.patch('/users/:id', asyncHandler(userController.adminPatchUserDisabled))
+admin.get('/users/:id', asyncHandler(userController.adminGetUser))
+admin.patch('/users/:id', asyncHandler(userController.adminPatchUser))
+admin.patch('/users/:id/disabled', asyncHandler(userController.adminPatchUserDisabled))
+
+admin.get('/size-charts', asyncHandler(sizeChartController.adminListSizeCharts))
+admin.post('/size-charts', asyncHandler(sizeChartController.adminCreateSizeChart))
+admin.patch('/size-charts/:id', asyncHandler(sizeChartController.adminUpdateSizeChart))
+admin.delete('/size-charts/:id', asyncHandler(sizeChartController.adminDeleteSizeChart))
+
+admin.get('/coupons', asyncHandler(couponController.adminListCoupons))
+admin.post('/coupons', asyncHandler(couponController.adminCreateCoupon))
+admin.patch('/coupons/:id', asyncHandler(couponController.adminUpdateCoupon))
+admin.delete('/coupons/:id', asyncHandler(couponController.adminDeleteCoupon))
 
 admin.get('/reviews', asyncHandler(reviewController.adminListReviews))
+admin.patch('/reviews/bulk', asyncHandler(reviewController.adminBulkReviews))
 admin.patch('/reviews/:id', asyncHandler(reviewController.adminPatchReview))
 admin.delete('/reviews/:id', asyncHandler(reviewController.adminDeleteReview))
 
