@@ -22,7 +22,13 @@ const {
   verifyPaymentSignature,
   assertRazorpayPaymentCaptured,
 } = require('./helpers/razorpay')
-const { resolveAndMaybeDecrementLine, restockLine, restockOrderItems } = require('./helpers/orderLineStock')
+const {
+  resolveAndMaybeDecrementLine,
+  restockOrderItems,
+  commitOrderItems,
+  undoInventoryLine,
+} = require('./helpers/orderLineStock')
+const { isCommitStatus, isPreCommitStatus } = require('./helpers/stockInventory')
 const {
   createPaymentForOrder,
   listPaymentsForOrderPublicId,
@@ -639,7 +645,7 @@ async function placeOrderWithoutTransaction({
   razorpayPaymentId = '',
   instrument = '',
 }) {
-  const decremented = []
+  const reservedUndo = []
   try {
     const verifiedItems = []
     let subtotal = 0
@@ -654,9 +660,9 @@ async function placeOrderWithoutTransaction({
           variantName: line.variantKey || line.variantName,
           name: line.name,
         },
-        { decrement: true }
+        { decrement: true, orderId: publicId }
       )
-      decremented.push(resolved.restock)
+      reservedUndo.push(resolved.undo)
       subtotal += resolved.price * quantity
       const item = {
         productId: resolved.productId,
@@ -713,8 +719,8 @@ async function placeOrderWithoutTransaction({
     })
     return doc
   } catch (err) {
-    for (const row of decremented) {
-      if (row) await restockLine(Product, row)
+    for (const row of reservedUndo) {
+      if (row) await undoInventoryLine(Product, row)
     }
     throw err
   }
@@ -1094,7 +1100,7 @@ async function customerRequestCancel(req, res) {
     doc.cancelReason = note
     doc.statusHistory = history
     await doc.save()
-    await restockOrderItems(Product, doc.items)
+    await restockOrderItems(Product, doc.items, null, doc.publicId, doc.stockCommitted)
     return res.json(doc.toJSON())
   }
 
@@ -1283,8 +1289,29 @@ async function adminPatchOrder(req, res) {
     })
   }
 
+  const nextStatusForInv = updates.status ?? existing.status
+  const statusChangedForInv =
+    updates.status !== undefined && updates.status !== existing.status
+
+  if (
+    statusChangedForInv &&
+    isCommitStatus(nextStatusForInv) &&
+    !existing.stockCommitted &&
+    isPreCommitStatus(existing.status)
+  ) {
+    await commitOrderItems(Product, existing.items, null, existing.publicId)
+    updates.stockCommitted = true
+  }
+
   if (updates.status && shouldRestockOnStatus(updates.status) && existing.status !== updates.status) {
-    await restockOrderItems(Product, existing.items)
+    const stockWasCommitted = existing.stockCommitted || updates.stockCommitted === true
+    await restockOrderItems(
+      Product,
+      existing.items,
+      null,
+      existing.publicId,
+      stockWasCommitted
+    )
   }
 
   const doc = await Order.findOneAndUpdate({ publicId: id }, { $set: updates }, { new: true })

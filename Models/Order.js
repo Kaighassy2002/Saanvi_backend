@@ -27,6 +27,8 @@ const orderSchema = new mongoose.Schema({
   customerUserId: { type: String, default: '' },
   cancellationRequestedAt: { type: Date, default: null },
   returnRequestedAt: { type: Date, default: null },
+  /** True after reserved stock is committed to a sale (Packed or later) */
+  stockCommitted: { type: Boolean, default: false },
   statusHistory: {
     type: [
       {

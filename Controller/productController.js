@@ -1,7 +1,55 @@
 const Product = require('../Models/Product')
+const SizeChart = require('../Models/SizeChart')
 const { getOrCreateSettings } = require('./helpers/siteSettings')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { parsePagination, paginatedResponse, parseSort } = require('./helpers/pagination')
+const { publishDueProducts } = require('./helpers/scheduledPublish')
+const { productsToCsv, importProductsFromCsv } = require('./helpers/productCsv')
+const { availableUnits } = require('./helpers/stockInventory')
+
+function toStorefrontProduct(json) {
+  const out = { ...json }
+  out.stock = availableUnits(json.stock, json.reservedStock)
+  delete out.reservedStock
+  if (Array.isArray(out.variants)) {
+    out.variants = out.variants.map((v) => {
+      const masked = { ...v }
+      masked.stock = availableUnits(v.stock, v.reservedStock)
+      delete masked.reservedStock
+      return masked
+    })
+  }
+  return out
+}
+
+function applyMakingChargePrice(body) {
+  if (!body?.useMakingChargePricing) return body
+  const metal = Number(body.metalValue) || 0
+  const making = Number(body.makingCharge) || 0
+  return { ...body, price: metal + making }
+}
+
+function parsePublishAt(raw) {
+  if (raw === null || raw === '') return null
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+async function attachSizeChart(productJson) {
+  const chartId = String(productJson.sizeChartId || '').trim()
+  if (!chartId || !isValidObjectId(chartId)) return productJson
+  const chart = await SizeChart.findById(chartId).lean()
+  if (!chart) return productJson
+  return {
+    ...productJson,
+    sizeChart: {
+      id: String(chart._id),
+      name: chart.name || '',
+      type: chart.type || 'general',
+      rows: Array.isArray(chart.rows) ? chart.rows : [],
+    },
+  }
+}
 function normalizeImagesFromBody(body) {
   if (Array.isArray(body.imagesMeta) && body.imagesMeta.length > 0) {
     const meta = body.imagesMeta
@@ -56,11 +104,13 @@ async function listCategories(_req, res) {
 }
 
 async function listPublishedProducts(_req, res) {
+  await publishDueProducts()
   const docs = await Product.find({ published: true }).sort({ createdAt: -1 })
-  res.json({ products: docs.map((d) => d.toJSON()) })
+  res.json({ products: docs.map((d) => toStorefrontProduct(d.toJSON())) })
 }
 
 async function getPublishedProductById(req, res) {
+  await publishDueProducts()
   const { id } = req.params
   if (!isValidObjectId(id)) {
     return res.status(404).json({ message: 'Product not found' })
@@ -68,6 +118,19 @@ async function getPublishedProductById(req, res) {
   const doc = await Product.findById(id)
   if (!doc || doc.published === false) {
     return res.status(404).json({ message: 'Product not found' })
+  }
+  const json = await attachSizeChart(toStorefrontProduct(doc.toJSON()))
+  res.json(json)
+}
+
+async function getPublicSizeChart(req, res) {
+  const { id } = req.params
+  if (!isValidObjectId(id)) {
+    return res.status(404).json({ message: 'Size chart not found' })
+  }
+  const doc = await SizeChart.findById(id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Size chart not found' })
   }
   res.json(doc.toJSON())
 }
@@ -134,8 +197,10 @@ async function adminBulkProducts(req, res) {
 }
 
 async function adminCreateProduct(req, res) {
-  const body = req.body || {}
+  const body = applyMakingChargePrice(req.body || {})
   const { images, imagesMeta } = normalizeImagesFromBody(body)
+  const publishAt = parsePublishAt(body.publishAt)
+  const scheduled = publishAt && publishAt > new Date()
   const doc = await Product.create({
     name: body.name,
     sku: body.sku,
@@ -146,6 +211,9 @@ async function adminCreateProduct(req, res) {
     originalPrice: body.originalPrice,
     discountType: body.discountType,
     discountValue: body.discountValue,
+    metalValue: body.metalValue != null ? Number(body.metalValue) : 0,
+    makingCharge: body.makingCharge != null ? Number(body.makingCharge) : 0,
+    useMakingChargePricing: !!body.useMakingChargePricing,
     images,
     imagesMeta,
     description: body.description,
@@ -159,8 +227,11 @@ async function adminCreateProduct(req, res) {
     variants: Array.isArray(body.variants) ? body.variants : [],
     stock: body.stock != null ? body.stock : 10,
     lowStockThreshold: body.lowStockThreshold != null ? body.lowStockThreshold : 5,
-    published: body.published !== false,
+    published: scheduled ? false : body.published !== false,
     featured: !!body.featured,
+    publishAt: scheduled ? publishAt : null,
+    sizeChartId: body.sizeChartId != null ? String(body.sizeChartId).trim() : '',
+    certification: body.certification,
     seoTitle: body.seoTitle,
     seoDescription: body.seoDescription,
     seoKeywords: Array.isArray(body.seoKeywords) ? body.seoKeywords : [],
@@ -196,8 +267,14 @@ async function adminUpdateProduct(req, res) {
   if (body.variants !== undefined) updates.variants = body.variants
   if (body.stock !== undefined) updates.stock = body.stock
   if (body.lowStockThreshold !== undefined) updates.lowStockThreshold = body.lowStockThreshold
+  if (body.metalValue !== undefined) updates.metalValue = Number(body.metalValue) || 0
+  if (body.makingCharge !== undefined) updates.makingCharge = Number(body.makingCharge) || 0
+  if (body.useMakingChargePricing !== undefined) updates.useMakingChargePricing = !!body.useMakingChargePricing
   if (body.published !== undefined) updates.published = body.published
   if (body.featured !== undefined) updates.featured = body.featured
+  if (body.publishAt !== undefined) updates.publishAt = parsePublishAt(body.publishAt)
+  if (body.sizeChartId !== undefined) updates.sizeChartId = String(body.sizeChartId || '').trim()
+  if (body.certification !== undefined) updates.certification = body.certification
   if (body.seoTitle !== undefined) updates.seoTitle = body.seoTitle
   if (body.seoDescription !== undefined) updates.seoDescription = body.seoDescription
   if (body.seoKeywords !== undefined) updates.seoKeywords = body.seoKeywords
@@ -207,11 +284,74 @@ async function adminUpdateProduct(req, res) {
     updates.images = normalized.images
     updates.imagesMeta = normalized.imagesMeta
   }
+  if (
+    body.useMakingChargePricing !== undefined ||
+    body.metalValue !== undefined ||
+    body.makingCharge !== undefined
+  ) {
+    const existing = await Product.findById(id).lean()
+    const useMc =
+      body.useMakingChargePricing !== undefined
+        ? !!body.useMakingChargePricing
+        : !!existing?.useMakingChargePricing
+    if (useMc) {
+      updates.price =
+        (updates.metalValue != null ? updates.metalValue : Number(existing?.metalValue) || 0) +
+        (updates.makingCharge != null ? updates.makingCharge : Number(existing?.makingCharge) || 0)
+    }
+  }
+
+  if (updates.publishAt && updates.publishAt > new Date()) {
+    updates.published = false
+  } else if (updates.publishAt && updates.publishAt <= new Date()) {
+    updates.published = true
+    updates.publishAt = null
+  }
+
   const doc = await Product.findByIdAndUpdate(id, { $set: updates }, { new: true, runValidators: true })
   if (!doc) {
     return res.status(404).json({ message: 'Product not found' })
   }
   res.json(doc.toJSON())
+}
+
+async function adminDuplicateProduct(req, res) {
+  const { id } = req.params
+  if (!isValidObjectId(id)) {
+    return res.status(404).json({ message: 'Product not found' })
+  }
+  const doc = await Product.findById(id).lean()
+  if (!doc) {
+    return res.status(404).json({ message: 'Product not found' })
+  }
+  const copy = { ...doc }
+  delete copy._id
+  delete copy.createdAt
+  delete copy.updatedAt
+  copy.name = `${copy.name || 'Product'} (Copy)`
+  if (copy.sku) copy.sku = `${copy.sku}-COPY`
+  copy.published = false
+  copy.publishAt = null
+  copy.featured = false
+  const newDoc = await Product.create(copy)
+  res.status(201).json(newDoc.toJSON())
+}
+
+async function adminExportProducts(_req, res) {
+  const docs = await Product.find().sort({ name: 1 })
+  const csv = productsToCsv(docs)
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="products.csv"')
+  res.send(csv)
+}
+
+async function adminImportProducts(req, res) {
+  const csv = req.body?.csv
+  if (!csv || typeof csv !== 'string') {
+    return res.status(400).json({ message: 'csv string required in request body' })
+  }
+  const result = await importProductsFromCsv(csv)
+  res.json(result)
 }
 
 async function adminDeleteProduct(req, res) {
@@ -272,6 +412,7 @@ module.exports = {
   listCategories,
   listPublishedProducts,
   getPublishedProductById,
+  getPublicSizeChart,
   listPublicNewArrivalIds,
   adminListProducts,
   adminGetProduct,
@@ -279,6 +420,9 @@ module.exports = {
   adminCreateProduct,
   adminUpdateProduct,
   adminDeleteProduct,
+  adminDuplicateProduct,
+  adminExportProducts,
+  adminImportProducts,
   adminListCategories,
   adminReplaceCategories,
   adminListNewArrivalIds,

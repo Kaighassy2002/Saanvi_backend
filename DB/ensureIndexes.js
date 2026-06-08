@@ -34,6 +34,9 @@ async function ensureIndexes() {
     safeCreateIndex(Product.collection, { name: 'text', sku: 'text', category: 'text' }),
     safeCreateIndex(Order.collection, { status: 1 }),
     safeCreateIndex(Order.collection, { createdAt: -1 }),
+    safeCreateIndex(Order.collection, { placedAt: -1 }),
+    safeCreateIndex(Order.collection, { paymentMethod: 1 }),
+    safeCreateIndex(Order.collection, { paymentStatus: 1 }),
     safeCreateIndex(Order.collection, { customerEmail: 1 }),
     // publicId: unique index is already created by Order schema — do not duplicate here
     safeCreateIndex(Payment.collection, { orderPublicId: 1 }),

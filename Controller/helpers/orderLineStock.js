@@ -1,3 +1,9 @@
+const {
+  availableUnits,
+  recordStockMovement,
+  maybeSendReorderAlert,
+} = require('./stockInventory')
+
 const COLOR_ATTR_KEYS = new Set(['color', 'colour', 'stone color', 'stone colour'])
 const SIZE_ATTR_KEYS = new Set(['size', 'sizes'])
 const VARIANT_KEY_SEP = '::'
@@ -88,79 +94,272 @@ function formatOrderItemName(productName, variant) {
 
 function getAvailableStock(product, variantKey) {
   const variant = findVariant(product, variantKey)
-  if (variant) return Math.max(0, Number(variant.stock) || 0)
-  return Math.max(0, Number(product?.stock) || 0)
+  if (variant) {
+    return availableUnits(variant.stock, variant.reservedStock)
+  }
+  return availableUnits(product?.stock, product?.reservedStock)
+}
+
+function resolveMatchName(product, variantKey) {
+  const key = String(variantKey || '').trim()
+  const found = findVariant(product, key)
+  return found ? String(found.name || '').trim() : key
+}
+
+async function reserveLine(Product, { productId, quantity, variantKey, variantName }, session, orderId = '') {
+  const qty = Number(quantity)
+  const key = String(variantKey || variantName || '').trim()
+
+  if (key) {
+    const preview = await Product.findOne({ _id: productId, published: true }).lean()
+    const matchName = resolveMatchName(preview, key)
+    const result = await Product.updateOne(
+      { _id: productId, published: true, 'variants.name': matchName },
+      { $inc: { 'variants.$[elem].reservedStock': qty } },
+      {
+        arrayFilters: [
+          {
+            'elem.name': matchName,
+            $expr: {
+              $gte: [
+                {
+                  $subtract: [
+                    '$elem.stock',
+                    { $ifNull: ['$elem.reservedStock', 0] },
+                  ],
+                },
+                qty,
+              ],
+            },
+          },
+        ],
+        session,
+      }
+    )
+    if (!result.modifiedCount) {
+      throw new Error('One or more products are unavailable or out of stock.')
+    }
+    const product = await Product.findById(productId).session(session || null)
+    const freshVariant = findVariant(product, key)
+    const stockAfter = Number(freshVariant?.stock) || 0
+    const reservedAfter = Number(freshVariant?.reservedStock) || 0
+    await recordStockMovement({
+      productId,
+      variantName: matchName,
+      delta: 0,
+      movementType: 'reserve',
+      reason: `Reserved ${qty} for order`,
+      orderId,
+      stockAfter,
+      reservedAfter,
+    })
+    await maybeSendReorderAlert(product, matchName)
+    const { unitPrice, image } = resolveLinePricing(product, freshVariant)
+    return {
+      productId: String(productId),
+      variantKey: matchName,
+      variantName: matchName,
+      name: formatOrderItemName(product.name, freshVariant),
+      quantity: qty,
+      price: unitPrice,
+      image,
+      undo: { mode: 'release', productId, quantity: qty, variantKey: matchName, orderId },
+    }
+  }
+
+  const product = await Product.findOneAndUpdate(
+    {
+      _id: productId,
+      published: true,
+      $expr: {
+        $gte: [
+          { $subtract: ['$stock', { $ifNull: ['$reservedStock', 0] }] },
+          qty,
+        ],
+      },
+    },
+    { $inc: { reservedStock: qty } },
+    { new: true, session }
+  )
+  if (!product) {
+    throw new Error('One or more products are unavailable or out of stock.')
+  }
+  await recordStockMovement({
+    productId,
+    variantName: '',
+    delta: 0,
+    movementType: 'reserve',
+    reason: `Reserved ${qty} for order`,
+    orderId,
+    stockAfter: Number(product.stock) || 0,
+    reservedAfter: Number(product.reservedStock) || 0,
+  })
+  await maybeSendReorderAlert(product, '')
+  const { unitPrice, image } = resolveLinePricing(product, null)
+  return {
+    productId: String(productId),
+    variantKey: '',
+    variantName: '',
+    name: product.name || 'Product',
+    quantity: qty,
+    price: unitPrice,
+    image,
+    undo: { mode: 'release', productId, quantity: qty, variantKey: '', orderId },
+  }
+}
+
+async function releaseReservation(Product, { productId, quantity, variantKey, variantName, orderId = '' }, session) {
+  const qty = Number(quantity)
+  const key = String(variantKey || variantName || '').trim()
+  if (key) {
+    const product = await Product.findOne({ _id: productId }).lean()
+    const matchName = resolveMatchName(product, key)
+    await Product.updateOne(
+      { _id: productId, 'variants.name': matchName },
+      { $inc: { 'variants.$[elem].reservedStock': -qty } },
+      { arrayFilters: [{ 'elem.name': matchName }], session }
+    )
+    const fresh = await Product.findById(productId).session(session || null)
+    const v = findVariant(fresh, key)
+    await recordStockMovement({
+      productId,
+      variantName: matchName,
+      delta: 0,
+      movementType: 'release',
+      reason: `Released reservation (${qty})`,
+      orderId,
+      stockAfter: Number(v?.stock) || 0,
+      reservedAfter: Math.max(0, Number(v?.reservedStock) || 0),
+    })
+    return
+  }
+  await Product.updateOne({ _id: productId }, { $inc: { reservedStock: -qty } }, { session })
+  const fresh = await Product.findById(productId).session(session || null)
+  await recordStockMovement({
+    productId,
+    variantName: '',
+    delta: 0,
+    movementType: 'release',
+    reason: `Released reservation (${qty})`,
+    orderId,
+    stockAfter: Number(fresh?.stock) || 0,
+    reservedAfter: Math.max(0, Number(fresh?.reservedStock) || 0),
+  })
+}
+
+async function commitReservation(Product, { productId, quantity, variantKey, variantName, orderId = '' }, session) {
+  const qty = Number(quantity)
+  const key = String(variantKey || variantName || '').trim()
+  if (key) {
+    const product = await Product.findOne({ _id: productId }).lean()
+    const matchName = resolveMatchName(product, key)
+    await Product.updateOne(
+      { _id: productId, 'variants.name': matchName },
+      {
+        $inc: {
+          'variants.$[elem].stock': -qty,
+          'variants.$[elem].reservedStock': -qty,
+        },
+      },
+      { arrayFilters: [{ 'elem.name': matchName }], session }
+    )
+    const fresh = await Product.findById(productId).session(session || null)
+    const v = findVariant(fresh, key)
+    await recordStockMovement({
+      productId,
+      variantName: matchName,
+      delta: -qty,
+      movementType: 'sale',
+      reason: `Committed sale (${qty})`,
+      orderId,
+      stockAfter: Number(v?.stock) || 0,
+      reservedAfter: Math.max(0, Number(v?.reservedStock) || 0),
+    })
+    await maybeSendReorderAlert(fresh, matchName)
+    return
+  }
+  await Product.updateOne(
+    { _id: productId },
+    { $inc: { stock: -qty, reservedStock: -qty } },
+    { session }
+  )
+  const fresh = await Product.findById(productId).session(session || null)
+  await recordStockMovement({
+    productId,
+    variantName: '',
+    delta: -qty,
+    movementType: 'sale',
+    reason: `Committed sale (${qty})`,
+    orderId,
+    stockAfter: Number(fresh?.stock) || 0,
+    reservedAfter: Math.max(0, Number(fresh?.reservedStock) || 0),
+  })
+  await maybeSendReorderAlert(fresh, '')
+}
+
+async function restockCommittedLine(Product, { productId, quantity, variantKey, variantName, orderId = '' }, session) {
+  const qty = Number(quantity)
+  const key = String(variantKey || variantName || '').trim()
+  if (key) {
+    const product = await Product.findOne({ _id: productId }).lean()
+    const matchName = resolveMatchName(product, key)
+    await Product.updateOne(
+      { _id: productId, 'variants.name': matchName },
+      { $inc: { 'variants.$[elem].stock': qty } },
+      { arrayFilters: [{ 'elem.name': matchName }], session }
+    )
+    const fresh = await Product.findById(productId).session(session || null)
+    const v = findVariant(fresh, key)
+    await recordStockMovement({
+      productId,
+      variantName: matchName,
+      delta: qty,
+      movementType: 'restock',
+      reason: `Restocked ${qty} from order`,
+      orderId,
+      stockAfter: Number(v?.stock) || 0,
+      reservedAfter: Number(v?.reservedStock) || 0,
+    })
+    return
+  }
+  await Product.updateOne({ _id: productId }, { $inc: { stock: qty } }, { session })
+  const fresh = await Product.findById(productId).session(session || null)
+  await recordStockMovement({
+    productId,
+    variantName: '',
+    delta: qty,
+    movementType: 'restock',
+    reason: `Restocked ${qty} from order`,
+    orderId,
+    stockAfter: Number(fresh?.stock) || 0,
+    reservedAfter: Number(fresh?.reservedStock) || 0,
+  })
 }
 
 /**
  * @param {import('mongoose').Model} Product
  * @param {{ productId: string, quantity: number, variantName?: string, variantKey?: string, name?: string }} line
- * @param {{ session?: import('mongoose').ClientSession, decrement?: boolean }} opts
+ * @param {{ session?: import('mongoose').ClientSession, decrement?: boolean, orderId?: string }} opts
  */
 async function resolveAndMaybeDecrementLine(Product, line, opts = {}) {
-  const { session, decrement = false } = opts
+  const { session, decrement = false, orderId = '' } = opts
   const quantity = Number(line.quantity)
   const productId = String(line.productId)
   const variantKey = String(line.variantKey || line.variantName || '').trim()
 
   if (decrement) {
-    if (variantKey) {
-      let matchName = variantKey
-      const preview = await Product.findOne({ _id: productId, published: true }).lean()
-      const found = findVariant(preview, variantKey)
-      if (found) matchName = String(found.name || '').trim()
-
-      const product = await Product.findOneAndUpdate(
-        {
-          _id: productId,
-          published: true,
-          variants: {
-            $elemMatch: { name: matchName, stock: { $gte: quantity } },
-          },
-        },
-        { $inc: { 'variants.$.stock': -quantity } },
-        { new: true, session }
-      )
-      if (!product) {
-        throw new Error('One or more products are unavailable or out of stock.')
-      }
-      const freshVariant = findVariant(product, variantKey)
-      const { unitPrice, image } = resolveLinePricing(product, freshVariant)
-      return {
-        productId,
-        variantKey: matchName,
-        variantName: matchName,
-        name: formatOrderItemName(product.name, freshVariant),
-        quantity,
-        price: unitPrice,
-        image,
-        restock: { productId, quantity, variantKey: matchName },
-      }
-    }
-
-    const product = await Product.findOneAndUpdate(
+    return reserveLine(
+      Product,
       {
-        _id: productId,
-        published: true,
-        stock: { $gte: quantity },
+        productId,
+        quantity,
+        variantKey,
+        variantName: variantKey,
+        name: line.name,
       },
-      { $inc: { stock: -quantity } },
-      { new: true, session }
+      session,
+      orderId
     )
-    if (!product) {
-      throw new Error('One or more products are unavailable or out of stock.')
-    }
-    const { unitPrice, image } = resolveLinePricing(product, null)
-    return {
-      productId,
-      variantKey: '',
-      variantName: '',
-      name: product.name || String(line.name || '').trim() || 'Product',
-      quantity,
-      price: unitPrice,
-      image,
-      restock: { productId, quantity, variantKey: '' },
-    }
   }
 
   let stockQuery = Product.findOne({ _id: productId, published: true })
@@ -184,47 +383,74 @@ async function resolveAndMaybeDecrementLine(Product, line, opts = {}) {
     quantity,
     price: unitPrice,
     image,
-    restock: null,
+    undo: null,
   }
 }
 
-async function restockLine(Product, { productId, quantity, variantKey, variantName }, session) {
-  const key = String(variantKey || variantName || '').trim()
-  if (key) {
-    const product = await Product.findOne({ _id: productId }).lean()
-    const variant = findVariant(product, key)
-    const matchName = variant ? String(variant.name || '').trim() : key
-    await Product.updateOne(
-      { _id: productId, 'variants.name': matchName },
-      { $inc: { 'variants.$.stock': Number(quantity) } },
-      { session }
-    )
+async function undoInventoryLine(Product, undo, session) {
+  if (!undo) return
+  if (undo.mode === 'release') {
+    await releaseReservation(Product, undo, session)
     return
   }
-  await Product.updateOne(
-    { _id: productId },
-    { $inc: { stock: Number(quantity) } },
-    { session }
-  )
+  if (undo.mode === 'restock') {
+    await restockCommittedLine(Product, undo, session)
+  }
 }
 
-async function restockOrderItems(Product, items, session = null) {
+async function restockOrderItems(Product, items, session = null, orderId = '', stockCommitted = false) {
   for (const item of items || []) {
-    await restockLine(
+    const row = {
+      productId: item.productId,
+      quantity: item.quantity,
+      variantKey: item.variantName || item.variantKey || '',
+      orderId,
+    }
+    if (stockCommitted) {
+      await restockCommittedLine(Product, row, session)
+    } else {
+      await releaseReservation(Product, row, session)
+    }
+  }
+}
+
+async function commitOrderItems(Product, items, session = null, orderId = '') {
+  for (const item of items || []) {
+    await commitReservation(
       Product,
       {
         productId: item.productId,
         quantity: item.quantity,
         variantKey: item.variantName || item.variantKey || '',
+        orderId,
       },
       session
     )
   }
 }
 
+/** @deprecated use undoInventoryLine */
+async function restockLine(Product, row, session) {
+  await restockCommittedLine(
+    Product,
+    {
+      productId: row.productId,
+      quantity: row.quantity,
+      variantKey: row.variantKey || row.variantName || '',
+    },
+    session
+  )
+}
+
 module.exports = {
   resolveAndMaybeDecrementLine,
   restockLine,
   restockOrderItems,
+  commitOrderItems,
+  releaseReservation,
+  commitReservation,
+  restockCommittedLine,
+  undoInventoryLine,
   getAvailableStock,
+  findVariant,
 }

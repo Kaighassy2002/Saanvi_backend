@@ -26,8 +26,10 @@ router.get('/health', (_req, res) => {
 })
 
 router.get('/categories', asyncHandler(productController.listCategories))
+router.get('/catalog/categories', asyncHandler(categoryController.listPublicCategories))
 router.get('/products', asyncHandler(productController.listPublishedProducts))
 router.get('/products/reviews/summaries', asyncHandler(reviewController.reviewSummaries))
+router.get('/size-charts/:id', asyncHandler(productController.getPublicSizeChart))
 router.get('/products/:id', asyncHandler(productController.getPublishedProductById))
 router.get(
   '/products/:id/reviews',
@@ -73,14 +75,19 @@ admin.get('/upload/cloudinary-signature', asyncHandler(uploadController.adminGet
 admin.get('/dashboard/summary', asyncHandler(dashboardController.adminDashboardSummary))
 
 admin.get('/products', asyncHandler(productController.adminListProducts))
+admin.get('/products/export', asyncHandler(productController.adminExportProducts))
+admin.post('/products/import', asyncHandler(productController.adminImportProducts))
 admin.patch('/products/bulk', asyncHandler(productController.adminBulkProducts))
+admin.post('/products/:id/duplicate', asyncHandler(productController.adminDuplicateProduct))
 admin.get('/products/:id', asyncHandler(productController.adminGetProduct))
 admin.post('/products', asyncHandler(productController.adminCreateProduct))
 admin.patch('/products/:id', asyncHandler(productController.adminUpdateProduct))
 admin.delete('/products/:id', asyncHandler(productController.adminDeleteProduct))
 
+admin.get('/inventory/stock', asyncHandler(inventoryController.adminAllStock))
 admin.get('/inventory/low-stock', asyncHandler(inventoryController.adminLowStock))
 admin.post('/inventory/adjust', asyncHandler(stockController.adminAdjustStock))
+admin.post('/inventory/stock-take', asyncHandler(stockController.adminStockTake))
 admin.get('/inventory/movements', asyncHandler(stockController.adminStockMovements))
 
 admin.get('/catalog/categories', asyncHandler(categoryController.adminListCategories))

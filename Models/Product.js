@@ -19,14 +19,26 @@ const keyValueSchema = new mongoose.Schema(
   { _id: false }
 )
 
+const certificationSchema = new mongoose.Schema(
+  {
+    bisHallmark: { type: Boolean, default: false },
+    bisLicense: { type: String, default: '' },
+    diamondCertUrl: { type: String, default: '' },
+    diamondCertNumber: { type: String, default: '' },
+  },
+  { _id: false }
+)
+
 const variantSchema = new mongoose.Schema(
   {
     name: { type: String, default: '' },
     sku: { type: String, default: '' },
     price: { type: Number, default: 0 },
     stock: { type: Number, default: 0 },
+    reservedStock: { type: Number, default: 0 },
     images: { type: [String], default: [] },
     attributes: { type: [keyValueSchema], default: [] },
+    certification: { type: certificationSchema, default: () => ({}) },
   },
   { _id: false }
 )
@@ -66,6 +78,9 @@ const productSchema = new mongoose.Schema(
     originalPrice: { type: Number, default: 0 },
     discountType: { type: String, enum: ['none', 'percent', 'flat'], default: 'none' },
     discountValue: { type: Number, default: 0 },
+    metalValue: { type: Number, default: 0 },
+    makingCharge: { type: Number, default: 0 },
+    useMakingChargePricing: { type: Boolean, default: false },
     // Media
     images: { type: [String], default: [] },
     imagesMeta: {
@@ -86,10 +101,14 @@ const productSchema = new mongoose.Schema(
     variants: { type: [variantSchema], default: [] },
     // Inventory
     stock: { type: Number, default: 10 },
+    reservedStock: { type: Number, default: 0 },
     lowStockThreshold: { type: Number, default: 5 },
     // Visibility
     published: { type: Boolean, default: true },
     featured: { type: Boolean, default: false },
+    publishAt: { type: Date, default: null },
+    sizeChartId: { type: String, default: '' },
+    certification: { type: certificationSchema, default: () => ({}) },
     // SEO
     seoTitle: { type: String, default: '' },
     seoDescription: { type: String, default: '' },
@@ -99,6 +118,16 @@ const productSchema = new mongoose.Schema(
   },
   { timestamps: true }
 )
+
+function normalizeCertification(raw) {
+  const c = raw && typeof raw === 'object' ? raw : {}
+  return {
+    bisHallmark: !!c.bisHallmark,
+    bisLicense: String(c.bisLicense || '').trim(),
+    diamondCertUrl: String(c.diamondCertUrl || '').trim(),
+    diamondCertNumber: String(c.diamondCertNumber || '').trim(),
+  }
+}
 
 function toClientProduct(doc) {
   const plain = doc.toObject ? doc.toObject() : { ...doc }
@@ -129,6 +158,9 @@ function toClientProduct(doc) {
     originalPrice: Number(plain.originalPrice) || 0,
     discountType: plain.discountType || 'none',
     discountValue: Number(plain.discountValue) || 0,
+    metalValue: Number(plain.metalValue) || 0,
+    makingCharge: Number(plain.makingCharge) || 0,
+    useMakingChargePricing: !!plain.useMakingChargePricing,
     image: images[0] || '',
     images,
     imagesMeta: imagesMeta.length > 0 ? imagesMeta : images.map((url) => ({ url, alt: '' })),
@@ -161,6 +193,7 @@ function toClientProduct(doc) {
           sku: v?.sku || '',
           price: Number(v?.price) || 0,
           stock: Number(v?.stock) || 0,
+          reservedStock: Number(v?.reservedStock) || 0,
           images: Array.isArray(v?.images) ? v.images.filter(Boolean) : [],
           attributes: Array.isArray(v?.attributes)
             ? v.attributes
@@ -170,12 +203,17 @@ function toClientProduct(doc) {
                 }))
                 .filter((x) => x.key && x.value)
             : [],
+          certification: normalizeCertification(v?.certification),
         }))
       : [],
     stock: plain.stock != null ? Number(plain.stock) : 10,
+    reservedStock: plain.reservedStock != null ? Number(plain.reservedStock) : 0,
     lowStockThreshold: plain.lowStockThreshold != null ? Number(plain.lowStockThreshold) : 5,
     published: plain.published !== false,
     featured: !!plain.featured,
+    publishAt: plain.publishAt || null,
+    sizeChartId: String(plain.sizeChartId || '').trim(),
+    certification: normalizeCertification(plain.certification),
     seoTitle: plain.seoTitle || '',
     seoDescription: plain.seoDescription || '',
     seoKeywords: Array.isArray(plain.seoKeywords) ? plain.seoKeywords : [],

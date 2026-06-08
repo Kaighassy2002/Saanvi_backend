@@ -49,6 +49,12 @@ connectDb()
   .then(() => require('./DB/ensureIndexes').ensureIndexes())
   .then(() => require('./seed/seedIfNeeded')())
   .then(() => {
+    const { publishDueProducts } = require('./Controller/helpers/scheduledPublish')
+    publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
+    setInterval(() => {
+      publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
+    }, 60 * 1000)
+
     app.listen(PORT, () => {
       console.log(`Jewellary Server start at port :${PORT}`)
     })

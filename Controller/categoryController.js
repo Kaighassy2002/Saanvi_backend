@@ -9,6 +9,21 @@ function slugify(text) {
     .replace(/^-|-$/g, '')
 }
 
+async function listPublicCategories(_req, res) {
+  const docs = await Category.find()
+    .sort({ sortOrder: 1, name: 1 })
+    .select('name image slug sortOrder')
+  res.json({
+    categories: docs.map((d) => ({
+      id: String(d._id),
+      name: d.name,
+      image: d.image || '',
+      slug: d.slug || '',
+      sortOrder: d.sortOrder ?? 0,
+    })),
+  })
+}
+
 async function adminListCategories(_req, res) {
   const docs = await Category.find().sort({ sortOrder: 1, name: 1 })
   res.json({ categories: docs.map((d) => d.toJSON()) })
@@ -60,6 +75,7 @@ async function adminDeleteCategory(req, res) {
 }
 
 module.exports = {
+  listPublicCategories,
   adminListCategories,
   adminCreateCategory,
   adminUpdateCategory,

@@ -2,8 +2,13 @@ const { getOrCreateSettings, resolveShippingFromDoc } = require('./helpers/siteS
 
 async function getPublicStoreSettings(_req, res) {
   const settings = await getOrCreateSettings()
-  const shipping = resolveShippingFromDoc(settings)
-  res.json({ shipping })
+  const client = settingsToClient(settings)
+  res.json({
+    shipping: client.shipping,
+    heroSlides: client.heroSlides,
+    featuredProductIds: client.featuredProductIds,
+    homeCategoryImages: client.homeCategoryImages,
+  })
 }
 
 async function adminGetShipping(_req, res) {
@@ -53,6 +58,7 @@ function settingsToClient(settings) {
     featuredProductIds: settings.featuredProductIds || [],
     featuredCollectionIds: settings.featuredCollectionIds || [],
     heroSlides: settings.heroSlides || [],
+    homeCategoryImages: settings.homeCategoryImages || [],
     categories: settings.categories || [],
   }
 }
@@ -74,6 +80,7 @@ async function adminUpdateSettings(req, res) {
   if (body.featuredProductIds !== undefined) settings.featuredProductIds = body.featuredProductIds.map(String)
   if (body.featuredCollectionIds !== undefined) settings.featuredCollectionIds = body.featuredCollectionIds.map(String)
   if (body.heroSlides !== undefined) settings.heroSlides = body.heroSlides
+  if (body.homeCategoryImages !== undefined) settings.homeCategoryImages = body.homeCategoryImages
   if (body.shipping) {
     const fee = Number(body.shipping.shippingFee)
     const threshold = Number(body.shipping.freeShippingThreshold)

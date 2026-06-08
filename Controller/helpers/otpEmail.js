@@ -134,9 +134,58 @@ async function sendAdminNewOrderEmail({
   return true
 }
 
+async function sendAdminLowStockEmail({
+  productName,
+  sku,
+  variantName,
+  available,
+  threshold,
+  onHand,
+  reserved,
+}) {
+  const to = adminNotifyEmail()
+  if (!to || !isMailConfigured()) return false
+  const { from } = mailConfig()
+  const transporter = makeTransporter()
+  const name = String(productName || 'Product').trim()
+  const skuLabel = String(sku || '').trim() || '—'
+  const variant = String(variantName || '').trim()
+  const avail = Number(available) || 0
+  const thresh = Number(threshold) || 0
+  const hand = Number(onHand) || 0
+  const res = Number(reserved) || 0
+  const variantLine = variant ? ` · ${variant}` : ''
+
+  await transporter.sendMail({
+    from,
+    to,
+    subject: `Low stock: ${name}${variantLine}`,
+    text: [
+      `Reorder alert — ${name}${variantLine}`,
+      `SKU: ${skuLabel}`,
+      `Available: ${avail} (on hand ${hand}, reserved ${res})`,
+      `Threshold: ${thresh}`,
+      '',
+      'Open admin → Inventory to restock or adjust counts.',
+    ].join('\n'),
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
+        <h2 style="margin:0 0 12px;">Low stock — reorder needed</h2>
+        <p style="margin:0 0 6px;"><strong>Product:</strong> ${name}${variant ? ` (${variant})` : ''}</p>
+        <p style="margin:0 0 6px;"><strong>SKU:</strong> ${skuLabel}</p>
+        <p style="margin:0 0 6px;"><strong>Available:</strong> ${avail} <span style="color:#666">(on hand ${hand}, reserved ${res})</span></p>
+        <p style="margin:0 0 12px;"><strong>Alert threshold:</strong> ${thresh}</p>
+        <p style="margin:0;">Sign in to admin → <strong>Inventory</strong> to restock.</p>
+      </div>
+    `,
+  })
+  return true
+}
+
 module.exports = {
   isMailConfigured,
   sendPasswordResetOtpEmail,
   sendOrderConfirmationEmail,
   sendAdminNewOrderEmail,
+  sendAdminLowStockEmail,
 }
