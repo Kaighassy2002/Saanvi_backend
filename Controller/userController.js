@@ -7,7 +7,11 @@ const Customer = require('../Models/Customer')
 const Order = require('../Models/Order')
 const Product = require('../Models/Product')
 const PasswordResetOtp = require('../Models/PasswordResetOtp')
-const { sendPasswordResetOtpEmail, sendOrderConfirmationEmail } = require('./helpers/otpEmail')
+const {
+  sendPasswordResetOtpEmail,
+  sendOrderConfirmationEmail,
+  sendAdminNewOrderEmail,
+} = require('./helpers/otpEmail')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { getShippingSettings, computeShippingFee } = require('./helpers/siteSettings')
 const {
@@ -18,7 +22,25 @@ const {
   verifyPaymentSignature,
   assertRazorpayPaymentCaptured,
 } = require('./helpers/razorpay')
-const { resolveAndMaybeDecrementLine, restockLine } = require('./helpers/orderLineStock')
+const { resolveAndMaybeDecrementLine, restockLine, restockOrderItems } = require('./helpers/orderLineStock')
+const {
+  createPaymentForOrder,
+  listPaymentsForOrderPublicId,
+  syncLatestPaymentStatus,
+} = require('./helpers/orderPayments')
+const {
+  getInitialOrderState,
+  validateOrderTransition,
+  validatePaymentTransition,
+  appendHistoryEntry,
+  canCustomerCancel,
+  canCustomerReturn,
+  shouldRestockOnStatus,
+  normalizeLegacyOrderStatus,
+  generateOrderPublicId,
+  buildPlacementHistory,
+  paymentStatusOnDelivered,
+} = require('./helpers/orderWorkflow')
 
 const MIN_PASSWORD_LEN = 8
 const OTP_LENGTH = 6
@@ -605,7 +627,18 @@ async function buildVerifiedOrderItems(rawItems, session) {
   return { verifiedItems, subtotal, shippingFee, total }
 }
 
-async function placeOrderWithoutTransaction({ body, shipping, customerName, publicId, date, customerUserId }) {
+async function placeOrderWithoutTransaction({
+  body,
+  shipping,
+  customerName,
+  publicId,
+  date,
+  customerUserId,
+  paymentStatus,
+  razorpayOrderId = '',
+  razorpayPaymentId = '',
+  instrument = '',
+}) {
   const decremented = []
   try {
     const verifiedItems = []
@@ -640,24 +673,45 @@ async function placeOrderWithoutTransaction({ body, shipping, customerName, publ
     if (!verifyClientTotal(body.total, total)) {
       throw new Error('Order total mismatch. Please refresh cart and try again.')
     }
-    return await Order.create({
+    const paymentMethod = normalizePaymentMethod(body.paymentMethod)
+    const placedAt = new Date()
+    const { status, paymentStatus: orderPaymentStatus } = getInitialOrderState(
+      paymentMethod,
+      paymentStatus
+    )
+    const doc = await Order.create({
       publicId,
       date,
-      status: 'Processing',
+      placedAt,
+      status,
       subtotal,
       shippingFee,
       total,
       customerEmail: shipping.email,
       customerName,
       shipping,
-      paymentMethod: normalizePaymentMethod(body.paymentMethod),
+      paymentMethod,
       trackingNumber: '',
       internalNotes: '',
       placedVia: 'storefront',
-      paymentStatus: normalizePaymentMethod(body.paymentMethod) === 'cod' ? 'pending' : 'paid',
+      paymentStatus: orderPaymentStatus,
       customerUserId,
       items: verifiedItems,
+      statusHistory: buildPlacementHistory({
+        paymentStatus: orderPaymentStatus,
+        paymentMethod,
+        by: 'system',
+      }),
     })
+    await createPaymentForOrder({
+      orderDoc: doc,
+      paymentMethod,
+      paymentStatus: orderPaymentStatus,
+      razorpayOrderId,
+      razorpayPaymentId,
+      instrument,
+    })
+    return doc
   } catch (err) {
     for (const row of decremented) {
       if (row) await restockLine(Product, row)
@@ -712,10 +766,17 @@ async function createPaidStorefrontOrder({
   paymentStatus,
   razorpayOrderId = '',
   razorpayPaymentId = '',
+  instrument = '',
 }) {
   const customerName = `${shipping.firstName} ${shipping.lastName}`.trim()
-  const publicId = `ORD-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`
-  const date = new Date().toISOString().slice(0, 10)
+  const publicId = await generateOrderPublicId(Order)
+  const placedAt = new Date()
+  const date = placedAt.toISOString().slice(0, 10)
+  const paymentMethod = normalizePaymentMethod(body.paymentMethod)
+  const { status: initialStatus, paymentStatus: orderPaymentStatus } = getInitialOrderState(
+    paymentMethod,
+    paymentStatus
+  )
   const session = await mongoose.startSession()
   let doc
   try {
@@ -729,26 +790,39 @@ async function createPaidStorefrontOrder({
         {
           publicId,
           date,
-          status: 'Processing',
+          placedAt,
+          status: initialStatus,
           subtotal,
           shippingFee,
           total,
           customerEmail: shipping.email,
           customerName,
           shipping,
-          paymentMethod: normalizePaymentMethod(body.paymentMethod),
-          paymentStatus,
-          razorpayOrderId: String(razorpayOrderId || ''),
-          razorpayPaymentId: String(razorpayPaymentId || ''),
+          paymentMethod,
+          paymentStatus: orderPaymentStatus,
           trackingNumber: '',
           internalNotes: '',
           placedVia: 'storefront',
           customerUserId,
           items: verifiedItems,
+          statusHistory: buildPlacementHistory({
+            paymentStatus: orderPaymentStatus,
+            paymentMethod,
+            by: 'system',
+          }),
         },
       ],
       { session }
     )
+    await createPaymentForOrder({
+      orderDoc: doc,
+      paymentMethod,
+      paymentStatus: orderPaymentStatus,
+      razorpayOrderId,
+      razorpayPaymentId,
+      instrument,
+      session,
+    })
     await session.commitTransaction()
   } catch (err) {
     await session.abortTransaction()
@@ -764,6 +838,10 @@ async function createPaidStorefrontOrder({
         publicId,
         date,
         customerUserId,
+        paymentStatus,
+        razorpayOrderId,
+        razorpayPaymentId,
+        instrument,
       })
     } else {
       throw err
@@ -811,6 +889,18 @@ async function customerPlaceOrder(req, res) {
     itemCount: doc.items.length,
   }).catch((err) => {
     console.error('Order confirmation email failed:', err.message)
+  })
+
+  sendAdminNewOrderEmail({
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    customerPhone: shipping.phone,
+    customerEmail: shipping.email,
+    total: doc.total,
+    itemCount: doc.items.length,
+    paymentMethod: doc.paymentMethod,
+  }).catch((err) => {
+    console.error('Admin new-order email failed:', err.message)
   })
 
   res.status(201).json(doc.toJSON())
@@ -900,7 +990,7 @@ async function verifyRazorpayPayment(req, res) {
     if (!verifyClientTotal(body.total, total)) {
       return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
     }
-    await assertRazorpayPaymentCaptured(rp, {
+    const rpPayment = await assertRazorpayPaymentCaptured(rp, {
       razorpayOrderId,
       razorpayPaymentId,
       expectedTotalInr: total,
@@ -916,6 +1006,7 @@ async function verifyRazorpayPayment(req, res) {
       paymentStatus: 'paid',
       razorpayOrderId,
       razorpayPaymentId,
+      instrument: String(rpPayment?.method || ''),
     })
     sendOrderConfirmationEmail({
       to: email,
@@ -926,6 +1017,17 @@ async function verifyRazorpayPayment(req, res) {
     }).catch((err) => {
       console.error('Order confirmation email failed:', err.message)
     })
+    sendAdminNewOrderEmail({
+      orderId: doc.publicId,
+      customerName: doc.customerName,
+      customerPhone: phone,
+      customerEmail: email,
+      total: doc.total,
+      itemCount: doc.items.length,
+      paymentMethod: doc.paymentMethod,
+    }).catch((err) => {
+      console.error('Admin new-order email failed:', err.message)
+    })
     res.status(201).json(doc.toJSON())
   } catch (err) {
     const msg = err?.message || 'Could not finalize payment order'
@@ -934,14 +1036,105 @@ async function verifyRazorpayPayment(req, res) {
   }
 }
 
+async function findCustomerOrderForRequest(req, orderId) {
+  const sub = String(req.customer.sub)
+  const customer = await Customer.findById(sub).select('email')
+  const email = (customer?.email || req.customer.email || '').toLowerCase().trim()
+  const doc = await Order.findOne({
+    publicId: String(orderId),
+    $or: [{ customerUserId: sub }, { customerEmail: email }],
+  })
+  return doc
+}
+
 async function customerListOrders(req, res) {
   const sub = String(req.customer.sub)
   const customer = await Customer.findById(sub).select('email')
   const email = (customer?.email || req.customer.email || '').toLowerCase().trim()
   const docs = await Order.find({
     $or: [{ customerUserId: sub }, { customerEmail: email }],
-  }).sort({ date: -1 })
+  }).sort({ placedAt: -1, date: -1 })
   res.json({ orders: docs.map((d) => d.toJSON()) })
+}
+
+async function customerGetOrder(req, res) {
+  const doc = await findCustomerOrderForRequest(req, req.params.id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const payments = await listPaymentsForOrderPublicId(doc.publicId)
+  res.json({
+    ...doc.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+  })
+}
+
+async function customerRequestCancel(req, res) {
+  const doc = await findCustomerOrderForRequest(req, req.params.id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  if (!canCustomerCancel(doc.status)) {
+    return res.status(400).json({
+      message: 'Cancellation is only available before your order is shipped',
+    })
+  }
+  const note = String(req.body?.note || 'Customer requested cancellation').trim()
+  const by = doc.customerEmail || 'customer'
+  const status = normalizeLegacyOrderStatus(doc.status)
+
+  if (status === 'Placed') {
+    const history = appendHistoryEntry(doc.statusHistory, {
+      status: 'Cancelled',
+      paymentStatus: doc.paymentStatus,
+      note: note || 'Order cancelled by customer',
+      by,
+    })
+    doc.status = 'Cancelled'
+    doc.cancelReason = note
+    doc.statusHistory = history
+    await doc.save()
+    await restockOrderItems(Product, doc.items)
+    return res.json(doc.toJSON())
+  }
+
+  const history = appendHistoryEntry(doc.statusHistory, {
+    status: doc.status,
+    paymentStatus: doc.paymentStatus,
+    note: note || 'Cancellation requested — awaiting store approval',
+    by,
+  })
+  doc.cancellationRequestedAt = new Date()
+  doc.cancelReason = note
+  doc.statusHistory = history
+  await doc.save()
+  res.json(doc.toJSON())
+}
+
+async function customerRequestReturn(req, res) {
+  const doc = await findCustomerOrderForRequest(req, req.params.id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  if (!canCustomerReturn(doc.status)) {
+    return res.status(400).json({ message: 'Returns are only available for delivered orders' })
+  }
+  const note = String(req.body?.note || 'Customer requested return').trim()
+  const err = validateOrderTransition(doc.status, 'Return Requested')
+  if (err) return res.status(400).json({ message: err })
+
+  const history = appendHistoryEntry(doc.statusHistory, {
+    status: 'Return Requested',
+    paymentStatus: doc.paymentStatus,
+    note: note || 'Return requested by customer',
+    by: doc.customerEmail || 'customer',
+  })
+  doc.status = 'Return Requested'
+  doc.returnRequestedAt = new Date()
+  doc.returnReason = note
+  doc.statusHistory = history
+  await doc.save()
+  res.json(doc.toJSON())
 }
 
 // --- admin orders ---
@@ -951,6 +1144,9 @@ async function adminListOrders(req, res) {
   const filter = {}
   if (req.query.status && req.query.status !== 'All') {
     filter.status = String(req.query.status)
+  }
+  if (req.query.paymentStatus && req.query.paymentStatus !== 'All') {
+    filter.paymentStatus = String(req.query.paymentStatus).toLowerCase()
   }
   if (q) {
     filter.$or = [
@@ -1001,7 +1197,11 @@ async function adminGetOrder(req, res) {
   if (!doc) {
     return res.status(404).json({ message: 'Order not found' })
   }
-  res.json(doc.toJSON())
+  const payments = await listPaymentsForOrderPublicId(id)
+  res.json({
+    ...doc.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+  })
 }
 
 async function adminPatchOrder(req, res) {
@@ -1011,6 +1211,10 @@ async function adminPatchOrder(req, res) {
     'status',
     'paymentStatus',
     'trackingNumber',
+    'courierPartner',
+    'estimatedDeliveryAt',
+    'cancelReason',
+    'returnReason',
     'internalNotes',
     'customerEmail',
     'customerName',
@@ -1019,8 +1223,6 @@ async function adminPatchOrder(req, res) {
     'total',
     'shipping',
     'paymentMethod',
-    'razorpayOrderId',
-    'razorpayPaymentId',
     'items',
     'date',
   ]
@@ -1033,22 +1235,68 @@ async function adminPatchOrder(req, res) {
     return res.status(404).json({ message: 'Order not found' })
   }
 
-  if (updates.status !== undefined || updates.paymentStatus !== undefined) {
-    const history = Array.isArray(existing.statusHistory) ? [...existing.statusHistory] : []
-    history.push({
-      status: updates.status ?? existing.status,
-      paymentStatus: updates.paymentStatus ?? existing.paymentStatus,
-      note: String(body.note || updates.internalNotes || ''),
-      at: new Date(),
+  if (updates.status !== undefined) {
+    const err = validateOrderTransition(existing.status, updates.status)
+    if (err) return res.status(400).json({ message: err })
+  }
+
+  if (updates.paymentStatus !== undefined) {
+    const err = validatePaymentTransition(existing.paymentStatus, updates.paymentStatus)
+    if (err) return res.status(400).json({ message: err })
+  }
+
+  if (updates.status === 'Delivered') {
+    const autoPaid = paymentStatusOnDelivered(existing)
+    if (autoPaid !== existing.paymentStatus) {
+      updates.paymentStatus = autoPaid
+    }
+    if (normalizeLegacyOrderStatus(existing.status) === 'Return Requested') {
+      updates.returnRequestedAt = null
+      updates.returnReason = ''
+    }
+  }
+
+  const nextStatus = updates.status ?? existing.status
+  const nextPaymentStatus = updates.paymentStatus ?? existing.paymentStatus
+  const statusChanged =
+    updates.status !== undefined && updates.status !== existing.status
+  const paymentChanged =
+    updates.paymentStatus !== undefined && updates.paymentStatus !== existing.paymentStatus
+
+  if (statusChanged || paymentChanged) {
+    const note = String(body.note || '').trim()
+    let historyNote = note
+    if (!historyNote) {
+      if (statusChanged && paymentChanged) {
+        historyNote = `Status → ${nextStatus}, Payment → ${nextPaymentStatus}`
+      } else if (statusChanged) {
+        historyNote = `Order ${nextStatus.toLowerCase()}`
+      } else {
+        historyNote = `Payment ${nextPaymentStatus}`
+      }
+    }
+    updates.statusHistory = appendHistoryEntry(existing.statusHistory, {
+      status: nextStatus,
+      paymentStatus: nextPaymentStatus,
+      note: historyNote,
       by: String(req.admin?.email || 'admin'),
     })
-    updates.statusHistory = history
+  }
+
+  if (updates.status && shouldRestockOnStatus(updates.status) && existing.status !== updates.status) {
+    await restockOrderItems(Product, existing.items)
   }
 
   const doc = await Order.findOneAndUpdate({ publicId: id }, { $set: updates }, { new: true })
   if (!doc) {
     return res.status(404).json({ message: 'Order not found' })
   }
+
+  if (updates.paymentStatus !== undefined) {
+    await syncLatestPaymentStatus(id, updates.paymentStatus)
+  }
+
+  const payments = await listPaymentsForOrderPublicId(id)
 
   await logAudit({
     adminEmail: req.admin?.email,
@@ -1058,7 +1306,10 @@ async function adminPatchOrder(req, res) {
     details: { status: doc.status, paymentStatus: doc.paymentStatus },
   })
 
-  res.json(doc.toJSON())
+  res.json({
+    ...doc.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+  })
 }
 
 module.exports = {
@@ -1077,6 +1328,9 @@ module.exports = {
   createRazorpayOrder,
   verifyRazorpayPayment,
   customerListOrders,
+  customerGetOrder,
+  customerRequestCancel,
+  customerRequestReturn,
   adminLogin,
   adminListUsers,
   adminGetUser,

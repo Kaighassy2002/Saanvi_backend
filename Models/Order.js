@@ -2,9 +2,12 @@ const mongoose = require('mongoose')
 
 const orderSchema = new mongoose.Schema({
   publicId: { type: String, required: true, unique: true },
+  /** YYYY-MM-DD for reporting / filters */
   date: { type: String, required: true },
-  status: { type: String, default: 'Processing' },
-  paymentStatus: { type: String, enum: ['pending', 'paid', 'failed', 'refunded'], default: 'pending' },
+  /** Full placement timestamp */
+  placedAt: { type: Date, default: Date.now },
+  status: { type: String, default: 'Placed' },
+  paymentStatus: { type: String, default: 'pending' },
   subtotal: { type: Number, default: 0 },
   shippingFee: { type: Number, default: 0 },
   total: { type: Number, default: 0 },
@@ -12,14 +15,18 @@ const orderSchema = new mongoose.Schema({
   customerName: { type: String, default: '' },
   shipping: { type: mongoose.Schema.Types.Mixed, default: {} },
   paymentMethod: { type: String, default: '' },
-  razorpayOrderId: { type: String, default: '' },
-  razorpayPaymentId: { type: String, default: '' },
   trackingNumber: { type: String, default: '' },
+  courierPartner: { type: String, default: '' },
+  estimatedDeliveryAt: { type: Date, default: null },
+  cancelReason: { type: String, default: '' },
+  returnReason: { type: String, default: '' },
   internalNotes: { type: String, default: '' },
   items: { type: [mongoose.Schema.Types.Mixed], default: [] },
   placedVia: { type: String, default: '' },
   /** Mongo Customer _id when order placed while logged in */
   customerUserId: { type: String, default: '' },
+  cancellationRequestedAt: { type: Date, default: null },
+  returnRequestedAt: { type: Date, default: null },
   statusHistory: {
     type: [
       {

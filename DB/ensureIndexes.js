@@ -1,5 +1,6 @@
 const Product = require('../Models/Product')
 const Order = require('../Models/Order')
+const Payment = require('../Models/Payment')
 const Customer = require('../Models/Customer')
 const Review = require('../Models/Review')
 
@@ -35,6 +36,10 @@ async function ensureIndexes() {
     safeCreateIndex(Order.collection, { createdAt: -1 }),
     safeCreateIndex(Order.collection, { customerEmail: 1 }),
     // publicId: unique index is already created by Order schema — do not duplicate here
+    safeCreateIndex(Payment.collection, { orderPublicId: 1 }),
+    safeCreateIndex(Payment.collection, { razorpayPaymentId: 1 }),
+    safeCreateIndex(Payment.collection, { status: 1 }),
+    safeCreateIndex(Payment.collection, { createdAt: -1 }),
     safeCreateIndex(Customer.collection, { email: 1 }),
     safeCreateIndex(Review.collection, { status: 1 }),
   ])

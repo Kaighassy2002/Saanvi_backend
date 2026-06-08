@@ -208,8 +208,23 @@ async function restockLine(Product, { productId, quantity, variantKey, variantNa
   )
 }
 
+async function restockOrderItems(Product, items, session = null) {
+  for (const item of items || []) {
+    await restockLine(
+      Product,
+      {
+        productId: item.productId,
+        quantity: item.quantity,
+        variantKey: item.variantName || item.variantKey || '',
+      },
+      session
+    )
+  }
+}
+
 module.exports = {
   resolveAndMaybeDecrementLine,
   restockLine,
+  restockOrderItems,
   getAvailableStock,
 }

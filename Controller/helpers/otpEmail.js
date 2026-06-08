@@ -70,8 +70,73 @@ async function sendOrderConfirmationEmail({ to, orderId, customerName, total, it
   return true
 }
 
+function adminNotifyEmail() {
+  return String(process.env.ADMIN_NOTIFY_EMAIL || process.env.ADMIN_EMAIL || '').trim()
+}
+
+function formatPaymentLabel(method) {
+  const key = String(method || '').trim().toLowerCase()
+  if (key === 'razorpay' || key === 'online' || key === 'upi' || key === 'card') return 'Online (Razorpay)'
+  return 'Cash on delivery'
+}
+
+async function sendAdminNewOrderEmail({
+  orderId,
+  customerName,
+  customerPhone,
+  customerEmail,
+  total,
+  itemCount,
+  paymentMethod,
+}) {
+  const to = adminNotifyEmail()
+  if (!to || !isMailConfigured()) return false
+  const { from } = mailConfig()
+  const transporter = makeTransporter()
+  const safeOrderId = String(orderId || '').trim() || 'New order'
+  const amount = Number(total || 0).toLocaleString('en-IN')
+  const count = Math.max(0, Number(itemCount || 0))
+  const payLabel = formatPaymentLabel(paymentMethod)
+  const name = String(customerName || 'Customer').trim() || 'Customer'
+  const phone = String(customerPhone || '').trim()
+  const email = String(customerEmail || '').trim()
+  await transporter.sendMail({
+    from,
+    to,
+    subject: `New order: ${safeOrderId}`,
+    text: [
+      `New storefront order ${safeOrderId}`,
+      `Customer: ${name}`,
+      phone ? `Phone: ${phone}` : '',
+      email ? `Email: ${email}` : '',
+      `Items: ${count}`,
+      `Total: INR ${amount}`,
+      `Payment: ${payLabel}`,
+      '',
+      `Open admin → Orders → ${safeOrderId} to fulfill.`,
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
+        <h2 style="margin:0 0 12px;">New order received</h2>
+        <p style="margin:0 0 6px;"><strong>Order ID:</strong> ${safeOrderId}</p>
+        <p style="margin:0 0 6px;"><strong>Customer:</strong> ${name}</p>
+        ${phone ? `<p style="margin:0 0 6px;"><strong>Phone:</strong> ${phone}</p>` : ''}
+        ${email ? `<p style="margin:0 0 6px;"><strong>Email:</strong> ${email}</p>` : ''}
+        <p style="margin:0 0 6px;"><strong>Items:</strong> ${count}</p>
+        <p style="margin:0 0 6px;"><strong>Total:</strong> INR ${amount}</p>
+        <p style="margin:0 0 12px;"><strong>Payment:</strong> ${payLabel}</p>
+        <p style="margin:0;">Sign in to admin → <strong>Orders</strong> → open <strong>${safeOrderId}</strong> to add tracking and update status.</p>
+      </div>
+    `,
+  })
+  return true
+}
+
 module.exports = {
   isMailConfigured,
   sendPasswordResetOtpEmail,
   sendOrderConfirmationEmail,
+  sendAdminNewOrderEmail,
 }

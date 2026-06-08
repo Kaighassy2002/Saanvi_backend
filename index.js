@@ -1,10 +1,13 @@
 require('dotenv').config({ override: true })
 const express = require('express')
 const cors = require('cors')
+const helmet = require('helmet')
 const { connectDb } = require('./DB/connection')
 const apiRouter = require('./Routes/router')
 
 const app = express()
+app.set('trust proxy', 1)
+app.use(helmet())
 
 function allowedOriginsFromEnv() {
   const raw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim()
@@ -31,7 +34,7 @@ app.use(
     },
   })
 )
-app.use(express.json())
+app.use(express.json({ limit: '1mb' }))
 app.use('/api', apiRouter)
 
 const PORT = Number(process.env.PORT) || 5000

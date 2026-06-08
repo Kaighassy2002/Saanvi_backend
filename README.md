@@ -36,6 +36,7 @@ cp .env.example .env
 | `GMAIL_USER` | Cond. | Gmail address used to send OTP emails |
 | `GMAIL_APP_PASSWORD` | Cond. | Gmail app password (not your normal account password) |
 | `MAIL_FROM` | No | Optional sender address/display, defaults to `GMAIL_USER` |
+| `ADMIN_NOTIFY_EMAIL` | Recommended | Receives email when a customer places an order |
 | `CLOUDINARY_CLOUD_NAME` | Cond. | Cloudinary cloud name (admin product image uploads) |
 | `CLOUDINARY_API_KEY` | Cond. | Cloudinary API key |
 | `CLOUDINARY_API_SECRET` | Cond. | Cloudinary API secret (server only; never expose to the browser) |
@@ -116,7 +117,7 @@ jewellery_backend/
 
 - **`CONNECTION_STRING is missing`** — Create `.env` from `.env.example` and set the Mongo URI.  
 - **Cannot login as admin** — Confirm seed ran; check `ADMIN_EMAIL` / `ADMIN_PASSWORD` in `.env`.  
-- **CORS** — Enabled for all origins in code; for production you may want to restrict `cors()` to your frontend origin.
+- **CORS** — Set `CORS_ALLOWED_ORIGINS` to your production storefront URL(s), comma-separated. If unset, only `http://localhost:5173` and `http://127.0.0.1:5173` are allowed. See [../docs/DEPLOYMENT.md](../docs/DEPLOYMENT.md).
 
 ---
 
