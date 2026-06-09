@@ -108,6 +108,7 @@ admin.put('/merchandising/new-arrivals', asyncHandler(productController.adminSav
 
 admin.get('/settings', asyncHandler(settingsController.adminGetSettings))
 admin.put('/settings', asyncHandler(settingsController.adminUpdateSettings))
+admin.get('/settings/integrations', asyncHandler(settingsController.adminGetIntegrationsHealth))
 admin.get('/shipping', asyncHandler(settingsController.adminGetShipping))
 admin.put('/shipping', asyncHandler(settingsController.adminUpdateShipping))
 
@@ -115,7 +116,14 @@ admin.get('/analytics/sales', asyncHandler(analyticsController.adminSalesAnalyti
 admin.get('/analytics/products', asyncHandler(analyticsController.adminProductAnalytics))
 
 admin.get('/orders/export', asyncHandler(userController.adminExportOrders))
+admin.get('/orders/courier-status', asyncHandler(userController.adminGetCourierStatus))
+admin.patch('/orders/bulk', asyncHandler(userController.adminBulkOrders))
 admin.get('/orders', asyncHandler(userController.adminListOrders))
+admin.get('/orders/:id/invoice', asyncHandler(userController.adminGetOrderInvoice))
+admin.post('/orders/:id/confirm-cod', asyncHandler(userController.adminConfirmCod))
+admin.post('/orders/:id/refund', asyncHandler(userController.adminProcessRefund))
+admin.post('/orders/:id/rma', asyncHandler(userController.adminRmaAction))
+admin.post('/orders/:id/courier/awb', asyncHandler(userController.adminGenerateCourierAwb))
 admin.get('/orders/:id', asyncHandler(userController.adminGetOrder))
 admin.patch('/orders/:id', asyncHandler(userController.adminPatchOrder))
 

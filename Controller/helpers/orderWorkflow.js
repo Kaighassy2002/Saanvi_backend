@@ -15,7 +15,9 @@ const ORDER_STATUSES = [
   'Returned',
 ]
 
-const PAYMENT_STATUSES = ['pending', 'paid', 'failed', 'refunded']
+const PAYMENT_STATUSES = ['pending', 'paid', 'failed', 'refunded', 'partially_refunded']
+
+const RMA_STATUSES = ['', 'requested', 'received', 'restocked', 'refunded']
 
 /** Forward fulfilment path */
 const FULFILMENT_FLOW = [
@@ -224,9 +226,28 @@ function fulfilmentStepIndex(status) {
   return idx >= 0 ? idx : 0
 }
 
+function requiresCodConfirmation(order, threshold = 10000) {
+  if (!isCodPayment(order.paymentMethod)) return false
+  if (order.codConfirmedAt) return false
+  const total = Number(order.total) || 0
+  const limit = Number(threshold) || 10000
+  return total >= limit
+}
+
+function canPackOrder(order, threshold = 10000) {
+  if (!requiresCodConfirmation(order, threshold)) return null
+  return 'High-value COD order must be confirmed before packing'
+}
+
+function generateRmaId(orderPublicId) {
+  const base = String(orderPublicId || 'ORD').replace(/^ORD-/, '')
+  return `RMA-${base}`
+}
+
 module.exports = {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
+  RMA_STATUSES,
   FULFILMENT_FLOW,
   ORDER_TRANSITIONS,
   PAYMENT_TRANSITIONS,
@@ -246,4 +267,7 @@ module.exports = {
   paymentStatusOnDelivered,
   formatPaymentStatusLabel,
   fulfilmentStepIndex,
+  requiresCodConfirmation,
+  canPackOrder,
+  generateRmaId,
 }

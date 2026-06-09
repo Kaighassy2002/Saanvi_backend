@@ -11,6 +11,9 @@ const {
   sendPasswordResetOtpEmail,
   sendOrderConfirmationEmail,
   sendAdminNewOrderEmail,
+  sendOrderStatusEmail,
+  sendOrderRefundEmail,
+  sendAdminReturnRequestEmail,
 } = require('./helpers/otpEmail')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { getShippingSettings, computeShippingFee } = require('./helpers/siteSettings')
@@ -46,7 +49,24 @@ const {
   generateOrderPublicId,
   buildPlacementHistory,
   paymentStatusOnDelivered,
+  canPackOrder,
+  generateRmaId,
+  isCodPayment,
 } = require('./helpers/orderWorkflow')
+const { getOrCreateSettings } = require('./helpers/siteSettings')
+const { generateGstInvoicePdf } = require('./helpers/orderInvoicePdf')
+const {
+  processRazorpayRefund,
+  resolveRefundPaymentStatus,
+  applyRefundToPayment,
+  round2,
+} = require('./helpers/orderRefund')
+const {
+  generateCourierAwb,
+  isShiprocketConfigured,
+  isDelhiveryConfigured,
+  trackingUrlForPartner,
+} = require('./helpers/orderCourier')
 
 const MIN_PASSWORD_LEN = 8
 const OTP_LENGTH = 6
@@ -1138,35 +1158,94 @@ async function customerRequestReturn(req, res) {
   doc.status = 'Return Requested'
   doc.returnRequestedAt = new Date()
   doc.returnReason = note
+  doc.rmaId = doc.rmaId || generateRmaId(doc.publicId)
+  doc.rmaStatus = 'requested'
   doc.statusHistory = history
   await doc.save()
+
+  sendOrderStatusEmail({
+    to: doc.customerEmail,
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    status: 'Return Requested',
+  }).catch(() => {})
+
+  sendAdminReturnRequestEmail({
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    returnReason: note,
+    rmaId: doc.rmaId,
+  }).catch(() => {})
+
   res.json(doc.toJSON())
 }
 
 // --- admin orders ---
 
-async function adminListOrders(req, res) {
-  const { page, limit, skip, q } = parsePagination(req.query)
+function buildOrderListFilter(query) {
   const filter = {}
-  if (req.query.status && req.query.status !== 'All') {
-    filter.status = String(req.query.status)
+  if (query.status && query.status !== 'All') {
+    filter.status = String(query.status)
   }
-  if (req.query.paymentStatus && req.query.paymentStatus !== 'All') {
-    filter.paymentStatus = String(req.query.paymentStatus).toLowerCase()
+  if (query.paymentStatus && query.paymentStatus !== 'All') {
+    filter.paymentStatus = String(query.paymentStatus).toLowerCase()
   }
+  if (query.paymentMethod && query.paymentMethod !== 'All') {
+    const key = String(query.paymentMethod).toLowerCase()
+    if (key === 'cod') filter.paymentMethod = { $in: ['cod', 'COD', 'Cash on Delivery'] }
+    else filter.paymentMethod = { $in: ['razorpay', 'online', 'upi', 'card', 'Razorpay'] }
+  }
+  if (query.codPending === '1' || query.codPending === 'true') {
+    filter.paymentMethod = { $in: ['cod', 'COD', 'Cash on Delivery'] }
+    filter.status = { $in: ['Placed', 'Confirmed'] }
+    filter.codConfirmedAt = null
+  }
+  const q = String(query.q || '').trim()
   if (q) {
     filter.$or = [
       { publicId: { $regex: q, $options: 'i' } },
       { customerEmail: { $regex: q, $options: 'i' } },
       { customerName: { $regex: q, $options: 'i' } },
       { 'shipping.phone': { $regex: q, $options: 'i' } },
+      { rmaId: { $regex: q, $options: 'i' } },
     ]
   }
-  if (req.query.from || req.query.to) {
+  if (query.from || query.to) {
     filter.date = {}
-    if (req.query.from) filter.date.$gte = String(req.query.from)
-    if (req.query.to) filter.date.$lte = String(req.query.to)
+    if (query.from) filter.date.$gte = String(query.from)
+    if (query.to) filter.date.$lte = String(query.to)
   }
+  return filter
+}
+
+async function notifyOrderStatusChange(doc, prevStatus) {
+  const status = normalizeLegacyOrderStatus(doc.status)
+  const prev = normalizeLegacyOrderStatus(prevStatus)
+  if (status === prev) return
+  const notifyStatuses = new Set([
+    'Confirmed',
+    'Shipped',
+    'Out For Delivery',
+    'Delivered',
+    'Cancelled',
+    'Return Requested',
+    'Returned',
+  ])
+  if (!notifyStatuses.has(status)) return
+  await sendOrderStatusEmail({
+    to: doc.customerEmail,
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    status,
+    trackingNumber: doc.trackingNumber || doc.courierAwb,
+    courierPartner: doc.courierPartner,
+    trackingUrl: doc.trackingUrl,
+  }).catch(() => {})
+}
+
+async function adminListOrders(req, res) {
+  const { page, limit, skip } = parsePagination(req.query)
+  const filter = buildOrderListFilter(req.query)
   const [docs, total] = await Promise.all([
     Order.find(filter).sort({ date: -1 }).skip(skip).limit(limit),
     Order.countDocuments(filter),
@@ -1175,18 +1254,39 @@ async function adminListOrders(req, res) {
   res.json(paginatedResponse(items, total, page, limit))
 }
 
-async function adminExportOrders(_req, res) {
-  const docs = await Order.find().sort({ date: -1 }).lean()
-  const header = ['id', 'date', 'status', 'paymentStatus', 'customerName', 'customerEmail', 'total']
+async function adminExportOrders(req, res) {
+  const filter = buildOrderListFilter(req.query || {})
+  const docs = await Order.find(filter).sort({ date: -1 }).lean()
+  const header = [
+    'id',
+    'date',
+    'status',
+    'paymentStatus',
+    'paymentMethod',
+    'customerName',
+    'customerEmail',
+    'phone',
+    'total',
+    'courierPartner',
+    'trackingNumber',
+    'rmaId',
+    'rmaStatus',
+  ]
   const rows = docs.map((o) =>
     [
       o.publicId,
       o.date,
       o.status,
       o.paymentStatus,
+      o.paymentMethod,
       o.customerName,
       o.customerEmail,
+      o.shipping?.phone || '',
       o.total,
+      o.courierPartner,
+      o.trackingNumber || o.courierAwb,
+      o.rmaId,
+      o.rmaStatus,
     ]
       .map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`)
       .join(',')
@@ -1244,6 +1344,11 @@ async function adminPatchOrder(req, res) {
   if (updates.status !== undefined) {
     const err = validateOrderTransition(existing.status, updates.status)
     if (err) return res.status(400).json({ message: err })
+    if (normalizeLegacyOrderStatus(updates.status) === 'Packed') {
+      const settings = await getOrCreateSettings()
+      const packErr = canPackOrder(existing, settings.codConfirmThreshold)
+      if (packErr) return res.status(400).json({ message: packErr })
+    }
   }
 
   if (updates.paymentStatus !== undefined) {
@@ -1314,6 +1419,7 @@ async function adminPatchOrder(req, res) {
     )
   }
 
+  const prevStatus = existing.status
   const doc = await Order.findOneAndUpdate({ publicId: id }, { $set: updates }, { new: true })
   if (!doc) {
     return res.status(404).json({ message: 'Order not found' })
@@ -1321,6 +1427,10 @@ async function adminPatchOrder(req, res) {
 
   if (updates.paymentStatus !== undefined) {
     await syncLatestPaymentStatus(id, updates.paymentStatus)
+  }
+
+  if (statusChanged) {
+    await notifyOrderStatusChange(doc, prevStatus)
   }
 
   const payments = await listPaymentsForOrderPublicId(id)
@@ -1336,6 +1446,384 @@ async function adminPatchOrder(req, res) {
   res.json({
     ...doc.toJSON(),
     payments: payments.map((p) => p.toJSON()),
+  })
+}
+
+async function adminBulkOrders(req, res) {
+  const { ids, action, note } = req.body || {}
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ message: 'ids array required' })
+  }
+  const validIds = [...new Set(ids.map((id) => String(id).trim()).filter(Boolean))]
+  if (!validIds.length) {
+    return res.status(400).json({ message: 'No valid order ids' })
+  }
+
+  const actionMap = {
+    confirm: 'Confirmed',
+    mark_packed: 'Packed',
+    mark_shipped: 'Shipped',
+    confirm_cod: '__cod__',
+  }
+  const targetStatus = actionMap[String(action || '').toLowerCase()]
+  if (!targetStatus) {
+    return res.status(400).json({ message: 'Unknown action. Use confirm, mark_packed, mark_shipped, or confirm_cod' })
+  }
+
+  const settings = await getOrCreateSettings()
+  const results = { updated: 0, failed: [] }
+
+  for (const id of validIds) {
+    try {
+      const existing = await Order.findOne({ publicId: id })
+      if (!existing) {
+        results.failed.push({ id, message: 'Not found' })
+        continue
+      }
+
+      if (targetStatus === '__cod__') {
+        if (!isCodPayment(existing.paymentMethod)) {
+          results.failed.push({ id, message: 'Not a COD order' })
+          continue
+        }
+        existing.codConfirmedAt = new Date()
+        existing.codConfirmedBy = String(req.admin?.email || 'admin')
+        existing.statusHistory = appendHistoryEntry(existing.statusHistory, {
+          status: existing.status,
+          paymentStatus: existing.paymentStatus,
+          note: note || 'COD order verified',
+          by: String(req.admin?.email || 'admin'),
+        })
+        await existing.save()
+        results.updated += 1
+        continue
+      }
+
+      const err = validateOrderTransition(existing.status, targetStatus)
+      if (err) {
+        results.failed.push({ id, message: err })
+        continue
+      }
+      if (targetStatus === 'Packed') {
+        const packErr = canPackOrder(existing, settings.codConfirmThreshold)
+        if (packErr) {
+          results.failed.push({ id, message: packErr })
+          continue
+        }
+      }
+
+      const prevStatus = existing.status
+      const history = appendHistoryEntry(existing.statusHistory, {
+        status: targetStatus,
+        paymentStatus: existing.paymentStatus,
+        note: note || `Bulk ${action}`,
+        by: String(req.admin?.email || 'admin'),
+      })
+
+      const updates = { status: targetStatus, statusHistory: history }
+      if (targetStatus === 'Packed' && !existing.stockCommitted && isPreCommitStatus(existing.status)) {
+        await commitOrderItems(Product, existing.items, null, existing.publicId)
+        updates.stockCommitted = true
+      }
+
+      const doc = await Order.findOneAndUpdate({ publicId: id }, { $set: updates }, { new: true })
+      await notifyOrderStatusChange(doc, prevStatus)
+      results.updated += 1
+    } catch (e) {
+      results.failed.push({ id, message: e?.message || 'Update failed' })
+    }
+  }
+
+  await logAudit({
+    adminEmail: req.admin?.email,
+    action: 'order.bulk',
+    entityType: 'order',
+    entityId: validIds.join(','),
+    details: { action, ...results },
+  })
+
+  res.json(results)
+}
+
+async function adminGetOrderInvoice(req, res) {
+  const { id } = req.params
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const settings = await getOrCreateSettings()
+  const store = {
+    storeName: settings.storeName,
+    storeLocation: settings.storeLocation,
+    storeState: settings.storeState,
+    storeGstin: settings.storeGstin,
+    supportEmail: settings.supportEmail,
+    supportPhone: settings.supportPhone,
+    defaultGstPercent: settings.defaultGstPercent,
+    defaultHsnCode: settings.defaultHsnCode,
+  }
+  const orderPlain = doc.toObject()
+  if (!orderPlain.invoiceNumber) {
+    const invNo = String(doc.publicId).startsWith('ORD-')
+      ? doc.publicId.replace('ORD-', 'INV-')
+      : `INV-${doc.publicId}`
+    orderPlain.invoiceNumber = invNo
+    doc.invoiceNumber = invNo
+    await doc.save()
+  }
+  const pdf = await generateGstInvoicePdf(orderPlain, store)
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `attachment; filename="${orderPlain.invoiceNumber || id}.pdf"`)
+  res.send(pdf)
+}
+
+async function adminConfirmCod(req, res) {
+  const { id } = req.params
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  if (!isCodPayment(doc.paymentMethod)) {
+    return res.status(400).json({ message: 'This is not a COD order' })
+  }
+  if (doc.codConfirmedAt) {
+    return res.json(doc.toJSON())
+  }
+  const note = String(req.body?.note || 'COD verified — safe to pack').trim()
+  doc.codConfirmedAt = new Date()
+  doc.codConfirmedBy = String(req.admin?.email || 'admin')
+  doc.statusHistory = appendHistoryEntry(doc.statusHistory, {
+    status: doc.status,
+    paymentStatus: doc.paymentStatus,
+    note,
+    by: String(req.admin?.email || 'admin'),
+  })
+  await doc.save()
+
+  await sendOrderStatusEmail({
+    to: doc.customerEmail,
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    status: 'Confirmed',
+  }).catch(() => {})
+
+  await logAudit({
+    adminEmail: req.admin?.email,
+    action: 'order.cod_confirm',
+    entityType: 'order',
+    entityId: id,
+    details: { total: doc.total },
+  })
+
+  const payments = await listPaymentsForOrderPublicId(id)
+  res.json({
+    ...doc.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+  })
+}
+
+async function adminProcessRefund(req, res) {
+  const { id } = req.params
+  const body = req.body || {}
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+
+  const orderTotal = round2(Number(doc.total) || 0)
+  const priorRefunded = (doc.refunds || []).reduce((s, r) => s + Number(r.amount || 0), 0)
+  const maxRefundable = round2(orderTotal - priorRefunded)
+  let amount = body.amount != null ? round2(body.amount) : maxRefundable
+  if (amount <= 0 || amount > maxRefundable + 0.01) {
+    return res.status(400).json({ message: `Refund amount must be between 0 and ${maxRefundable}` })
+  }
+
+  const reason = String(body.reason || '').trim()
+  const note = String(body.note || '').trim()
+  const by = String(req.admin?.email || 'admin')
+  const payments = await listPaymentsForOrderPublicId(id)
+  const razorpayPayment = payments.find((p) => p.provider === 'razorpay' && p.razorpayPaymentId)
+
+  let refundRecord
+  if (razorpayPayment && body.skipGateway !== true) {
+    refundRecord = await processRazorpayRefund({
+      order: doc,
+      payment: razorpayPayment,
+      amountInr: amount,
+      reason,
+      note,
+      by,
+    })
+  } else {
+    refundRecord = {
+      amount,
+      currency: 'INR',
+      reason,
+      note,
+      razorpayRefundId: '',
+      status: isCodPayment(doc.paymentMethod) ? 'manual_cod' : 'manual',
+      provider: isCodPayment(doc.paymentMethod) ? 'cod' : 'manual',
+      by,
+      at: new Date(),
+    }
+  }
+
+  const nextPaymentStatus = resolveRefundPaymentStatus(orderTotal, doc.refunds, amount)
+  doc.refunds = [...(doc.refunds || []), refundRecord]
+  doc.paymentStatus = nextPaymentStatus
+  if (doc.rmaStatus && doc.rmaStatus !== 'refunded') {
+    doc.rmaStatus = 'refunded'
+  }
+  doc.statusHistory = appendHistoryEntry(doc.statusHistory, {
+    status: doc.status,
+    paymentStatus: nextPaymentStatus,
+    note: note || `Refund INR ${amount}${reason ? ` — ${reason}` : ''}`,
+    by,
+  })
+  await doc.save()
+  await applyRefundToPayment(id, nextPaymentStatus)
+
+  await sendOrderRefundEmail({
+    to: doc.customerEmail,
+    orderId: doc.publicId,
+    customerName: doc.customerName,
+    amount,
+    note: note || reason,
+  }).catch(() => {})
+
+  await logAudit({
+    adminEmail: req.admin?.email,
+    action: 'order.refund',
+    entityType: 'order',
+    entityId: id,
+    details: { amount, reason, razorpayRefundId: refundRecord.razorpayRefundId },
+  })
+
+  const updatedPayments = await listPaymentsForOrderPublicId(id)
+  res.json({
+    ...doc.toJSON(),
+    payments: updatedPayments.map((p) => p.toJSON()),
+  })
+}
+
+async function adminRmaAction(req, res) {
+  const { id } = req.params
+  const step = String(req.body?.step || '').toLowerCase()
+  const note = String(req.body?.note || '').trim()
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  if (!doc.rmaId && doc.status !== 'Return Requested') {
+    return res.status(400).json({ message: 'No active RMA for this order' })
+  }
+
+  const by = String(req.admin?.email || 'admin')
+  const updates = {}
+  let historyNote = note
+
+  if (step === 'receive') {
+    updates.rmaStatus = 'received'
+    updates.returnReceivedAt = new Date()
+    historyNote = historyNote || 'Return received at warehouse'
+  } else if (step === 'restock') {
+    updates.rmaStatus = 'restocked'
+    updates.returnRestockedAt = new Date()
+    updates.status = 'Returned'
+    historyNote = historyNote || 'Items restocked'
+    if (doc.status !== 'Returned') {
+      const err = validateOrderTransition(doc.status, 'Returned')
+      if (err) return res.status(400).json({ message: err })
+    }
+    const stockWasCommitted = doc.stockCommitted
+    await restockOrderItems(Product, doc.items, null, doc.publicId, stockWasCommitted)
+  } else if (step === 'refund') {
+    return adminProcessRefund(req, res)
+  } else {
+    return res.status(400).json({ message: 'step must be receive, restock, or refund' })
+  }
+
+  updates.statusHistory = appendHistoryEntry(doc.statusHistory, {
+    status: updates.status || doc.status,
+    paymentStatus: doc.paymentStatus,
+    note: historyNote,
+    by,
+  })
+
+  const prevStatus = doc.status
+  const updated = await Order.findOneAndUpdate({ publicId: id }, { $set: updates }, { new: true })
+  if (updates.status && updates.status !== prevStatus) {
+    await notifyOrderStatusChange(updated, prevStatus)
+  }
+
+  await logAudit({
+    adminEmail: req.admin?.email,
+    action: `order.rma.${step}`,
+    entityType: 'order',
+    entityId: id,
+    details: { rmaId: updated.rmaId, rmaStatus: updated.rmaStatus },
+  })
+
+  const payments = await listPaymentsForOrderPublicId(id)
+  res.json({
+    ...updated.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+  })
+}
+
+async function adminGenerateCourierAwb(req, res) {
+  const { id } = req.params
+  const partner = String(req.body?.partner || 'shiprocket').toLowerCase()
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+
+  const settings = await getOrCreateSettings()
+  const store = {
+    storeName: settings.storeName,
+    storeLocation: settings.storeLocation,
+    storeGstin: settings.storeGstin,
+    defaultHsnCode: settings.defaultHsnCode,
+  }
+
+  const result = await generateCourierAwb(doc.toObject(), store, partner)
+  const trackingUrl =
+    result.trackingUrl || trackingUrlForPartner(result.partner, result.awb)
+
+  doc.courierPartner = result.courierName || result.partner
+  doc.courierAwb = result.awb
+  doc.courierShipmentId = result.shipmentId || ''
+  doc.trackingNumber = result.awb || doc.trackingNumber
+  doc.trackingUrl = trackingUrl
+  doc.statusHistory = appendHistoryEntry(doc.statusHistory, {
+    status: doc.status,
+    paymentStatus: doc.paymentStatus,
+    note: `AWB generated via ${result.partner}: ${result.awb || 'pending'}`,
+    by: String(req.admin?.email || 'admin'),
+  })
+  await doc.save()
+
+  await logAudit({
+    adminEmail: req.admin?.email,
+    action: 'order.courier_awb',
+    entityType: 'order',
+    entityId: id,
+    details: { partner: result.partner, awb: result.awb },
+  })
+
+  const payments = await listPaymentsForOrderPublicId(id)
+  res.json({
+    ...doc.toJSON(),
+    payments: payments.map((p) => p.toJSON()),
+    courier: result,
+  })
+}
+
+async function adminGetCourierStatus(_req, res) {
+  res.json({
+    shiprocket: isShiprocketConfigured(),
+    delhivery: isDelhiveryConfigured(),
   })
 }
 
@@ -1367,4 +1855,11 @@ module.exports = {
   adminExportOrders,
   adminGetOrder,
   adminPatchOrder,
+  adminBulkOrders,
+  adminGetOrderInvoice,
+  adminConfirmCod,
+  adminProcessRefund,
+  adminRmaAction,
+  adminGenerateCourierAwb,
+  adminGetCourierStatus,
 }

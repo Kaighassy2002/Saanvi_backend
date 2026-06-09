@@ -9,6 +9,9 @@ const HERO_UPLOAD_TRANSFORM = 'c_fill,w_1600,h_2000,g_auto,f_auto,q_auto'
 /** Home category circles / tiles — square crop */
 const CATEGORY_UPLOAD_TRANSFORM = 'c_fill,w_800,h_800,g_auto,f_auto,q_auto'
 
+/** Home promo banners — landscape crop */
+const PROMO_UPLOAD_TRANSFORM = 'c_fill,w_1200,h_800,g_auto,f_auto,q_auto'
+
 const UPLOAD_PURPOSES = {
   product: {
     folder: () => process.env.CLOUDINARY_FOLDER || 'Home/Jewellery/Products',
@@ -21,6 +24,10 @@ const UPLOAD_PURPOSES = {
   category: {
     folder: () => process.env.CLOUDINARY_FOLDER_CATEGORY || 'Home/Jewellery/categories',
     transformation: CATEGORY_UPLOAD_TRANSFORM,
+  },
+  promo: {
+    folder: () => process.env.CLOUDINARY_FOLDER_PROMO || 'Home/Jewellery/promo',
+    transformation: PROMO_UPLOAD_TRANSFORM,
   },
 }
 
@@ -66,4 +73,5 @@ module.exports = {
   PRODUCT_UPLOAD_TRANSFORM,
   HERO_UPLOAD_TRANSFORM,
   CATEGORY_UPLOAD_TRANSFORM,
+  PROMO_UPLOAD_TRANSFORM,
 }

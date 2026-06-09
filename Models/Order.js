@@ -27,6 +27,39 @@ const orderSchema = new mongoose.Schema({
   customerUserId: { type: String, default: '' },
   cancellationRequestedAt: { type: Date, default: null },
   returnRequestedAt: { type: Date, default: null },
+  /** RMA workflow — structured returns ops */
+  rmaId: { type: String, default: '' },
+  rmaStatus: {
+    type: String,
+    enum: ['', 'requested', 'received', 'restocked', 'refunded'],
+    default: '',
+  },
+  returnReceivedAt: { type: Date, default: null },
+  returnRestockedAt: { type: Date, default: null },
+  /** GST tax invoice number (defaults from ORD → INV mapping) */
+  invoiceNumber: { type: String, default: '' },
+  /** COD verification before packing high-value orders */
+  codConfirmedAt: { type: Date, default: null },
+  codConfirmedBy: { type: String, default: '' },
+  courierAwb: { type: String, default: '' },
+  courierShipmentId: { type: String, default: '' },
+  trackingUrl: { type: String, default: '' },
+  refunds: {
+    type: [
+      {
+        amount: Number,
+        currency: { type: String, default: 'INR' },
+        reason: String,
+        note: String,
+        razorpayRefundId: String,
+        provider: String,
+        status: String,
+        by: String,
+        at: { type: Date, default: Date.now },
+      },
+    ],
+    default: [],
+  },
   /** True after reserved stock is committed to a sale (Packed or later) */
   stockCommitted: { type: Boolean, default: false },
   statusHistory: {

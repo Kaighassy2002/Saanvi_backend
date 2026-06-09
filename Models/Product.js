@@ -211,6 +211,8 @@ function toClientProduct(doc) {
     lowStockThreshold: plain.lowStockThreshold != null ? Number(plain.lowStockThreshold) : 5,
     published: plain.published !== false,
     featured: !!plain.featured,
+    createdAt: plain.createdAt || null,
+    updatedAt: plain.updatedAt || null,
     publishAt: plain.publishAt || null,
     sizeChartId: String(plain.sizeChartId || '').trim(),
     certification: normalizeCertification(plain.certification),

@@ -182,10 +182,126 @@ async function sendAdminLowStockEmail({
   return true
 }
 
+function orderEmailShell({ title, bodyHtml, bodyText }) {
+  return {
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
+        <h2 style="margin:0 0 12px;">${title}</h2>
+        ${bodyHtml}
+      </div>
+    `,
+    text: bodyText,
+  }
+}
+
+async function sendOrderStatusEmail({ to, orderId, customerName, status, trackingNumber, courierPartner, trackingUrl }) {
+  const { from } = mailConfig()
+  if (!isMailConfigured() || !to) return false
+  const transporter = makeTransporter()
+  const safeName = String(customerName || 'Customer').trim() || 'Customer'
+  const safeOrderId = String(orderId || '').trim()
+  const s = String(status || '').trim()
+
+  let subject = `Order update: ${safeOrderId}`
+  let title = 'Order update'
+  let detail = `Your order status is now: ${s}.`
+  let extraHtml = ''
+  let extraText = ''
+
+  if (s === 'Confirmed') {
+    subject = `Order confirmed: ${safeOrderId}`
+    title = 'Your order is confirmed'
+    detail = 'We have confirmed your order and will pack it soon.'
+  } else if (s === 'Shipped' || s === 'Out For Delivery') {
+    subject = `Order shipped: ${safeOrderId}`
+    title = s === 'Out For Delivery' ? 'Your order is out for delivery' : 'Your order has shipped'
+    detail = 'Your package is on the way.'
+    if (trackingNumber || courierPartner) {
+      const track = trackingUrl || (trackingNumber ? `Tracking: ${trackingNumber}` : '')
+      extraHtml = `<p style="margin:8px 0 0;"><strong>Courier:</strong> ${courierPartner || '—'}<br/><strong>Tracking:</strong> ${trackingNumber || '—'}${trackingUrl ? `<br/><a href="${trackingUrl}">Track shipment</a>` : ''}</p>`
+      extraText = `\nCourier: ${courierPartner || '—'}\nTracking: ${trackingNumber || '—'}${track ? `\n${track}` : ''}`
+    }
+  } else if (s === 'Delivered') {
+    subject = `Order delivered: ${safeOrderId}`
+    title = 'Your order was delivered'
+    detail = 'Thank you for shopping with us. We hope you love your purchase!'
+  } else if (s === 'Cancelled') {
+    subject = `Order cancelled: ${safeOrderId}`
+    title = 'Your order was cancelled'
+    detail = 'Your order has been cancelled. If you were charged online, a refund will be processed shortly.'
+  } else if (s === 'Return Requested') {
+    subject = `Return requested: ${safeOrderId}`
+    title = 'We received your return request'
+    detail = 'Our team will review your return and share pickup or drop-off instructions.'
+  } else if (s === 'Returned') {
+    subject = `Return completed: ${safeOrderId}`
+    title = 'Your return is complete'
+    detail = 'We have received your returned items. Refunds are processed per our returns policy.'
+  }
+
+  const { html, text } = orderEmailShell({
+    title,
+    bodyHtml: `<p style="margin:0 0 8px;">Hi ${safeName},</p><p style="margin:0 0 8px;">${detail}</p><p style="margin:0 0 6px;"><strong>Order ID:</strong> ${safeOrderId}</p>${extraHtml}`,
+    bodyText: `Hi ${safeName},\n\n${detail}\n\nOrder ID: ${safeOrderId}${extraText}`,
+  })
+
+  await transporter.sendMail({ from, to, subject, text, html })
+  return true
+}
+
+async function sendOrderRefundEmail({ to, orderId, customerName, amount, note }) {
+  const { from } = mailConfig()
+  if (!isMailConfigured() || !to) return false
+  const transporter = makeTransporter()
+  const safeName = String(customerName || 'Customer').trim() || 'Customer'
+  const safeOrderId = String(orderId || '').trim()
+  const amt = Number(amount || 0).toLocaleString('en-IN')
+  const { html, text } = orderEmailShell({
+    title: 'Refund processed',
+    bodyHtml: `<p style="margin:0 0 8px;">Hi ${safeName},</p><p style="margin:0 0 8px;">A refund of <strong>INR ${amt}</strong> has been initiated for order <strong>${safeOrderId}</strong>.</p>${note ? `<p style="margin:0;">Note: ${note}</p>` : ''}<p style="margin:12px 0 0;">Refunds typically appear in 5–7 business days depending on your bank.</p>`,
+    bodyText: `Hi ${safeName},\n\nRefund of INR ${amt} initiated for order ${safeOrderId}.${note ? `\nNote: ${note}` : ''}\n\nRefunds typically appear in 5–7 business days.`,
+  })
+  await transporter.sendMail({
+    from,
+    to,
+    subject: `Refund processed: ${safeOrderId}`,
+    text,
+    html,
+  })
+  return true
+}
+
+async function sendAdminReturnRequestEmail({ orderId, customerName, returnReason, rmaId }) {
+  const to = adminNotifyEmail()
+  if (!to || !isMailConfigured()) return false
+  const { from } = mailConfig()
+  const transporter = makeTransporter()
+  await transporter.sendMail({
+    from,
+    to,
+    subject: `Return requested: ${orderId}`,
+    text: `Return request for ${orderId}\nCustomer: ${customerName}\nRMA: ${rmaId || '—'}\nReason: ${returnReason || '—'}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
+        <h2 style="margin:0 0 12px;">Return request</h2>
+        <p><strong>Order:</strong> ${orderId}</p>
+        <p><strong>Customer:</strong> ${customerName}</p>
+        ${rmaId ? `<p><strong>RMA:</strong> ${rmaId}</p>` : ''}
+        <p><strong>Reason:</strong> ${returnReason || '—'}</p>
+        <p>Open admin → Orders to process receive → restock → refund.</p>
+      </div>
+    `,
+  })
+  return true
+}
+
 module.exports = {
   isMailConfigured,
   sendPasswordResetOtpEmail,
   sendOrderConfirmationEmail,
   sendAdminNewOrderEmail,
   sendAdminLowStockEmail,
+  sendOrderStatusEmail,
+  sendOrderRefundEmail,
+  sendAdminReturnRequestEmail,
 }
