@@ -16,8 +16,10 @@ const analyticsController = require('../Controller/analyticsController')
 const stockController = require('../Controller/stockController')
 const sizeChartController = require('../Controller/sizeChartController')
 const couponController = require('../Controller/couponController')
+const seoController = require('../Controller/seoController')
 const { optionalCustomer } = require('../middleware/optionalCustomer')
 const { authLimiter, forgotPasswordLimiter, orderLimiter } = require('../middleware/rateLimits')
+const { cachePublic } = require('../middleware/cachePublic')
 
 const router = express.Router()
 
@@ -25,9 +27,12 @@ router.get('/health', (_req, res) => {
   res.json({ ok: true })
 })
 
+router.get('/sitemap.xml', cachePublic(3600), asyncHandler(seoController.getSitemapXml))
+
 router.get('/categories', asyncHandler(productController.listCategories))
 router.get('/catalog/categories', asyncHandler(categoryController.listPublicCategories))
-router.get('/products', asyncHandler(productController.listPublishedProducts))
+router.get('/products/listing', cachePublic(30), asyncHandler(productController.listPublishedProductsListing))
+router.get('/products', cachePublic(60), asyncHandler(productController.listPublishedProducts))
 router.get('/products/reviews/summaries', asyncHandler(reviewController.reviewSummaries))
 router.get('/size-charts/:id', asyncHandler(productController.getPublicSizeChart))
 router.get('/products/:id', asyncHandler(productController.getPublishedProductById))
@@ -41,12 +46,14 @@ router.post(
   requireCustomer,
   asyncHandler(reviewController.createProductReview)
 )
+router.get('/merchandising/new-arrivals/products', asyncHandler(productController.listPublicNewArrivalProducts))
 router.get('/merchandising/new-arrivals', asyncHandler(productController.listPublicNewArrivalIds))
-router.get('/store-settings', asyncHandler(settingsController.getPublicStoreSettings))
+router.get('/store-settings', cachePublic(60), asyncHandler(settingsController.getPublicStoreSettings))
 router.get('/payments/razorpay-config', asyncHandler(paymentsController.getRazorpayConfig))
 
 router.post('/auth/register', authLimiter, asyncHandler(userController.customerRegister))
 router.post('/auth/login', authLimiter, asyncHandler(userController.customerLogin))
+router.post('/auth/google', authLimiter, asyncHandler(userController.customerGoogleLogin))
 router.post('/auth/forgot-password/request', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordRequest))
 router.post('/auth/forgot-password/verify', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordVerifyOtp))
 router.post('/auth/forgot-password/reset', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordReset))

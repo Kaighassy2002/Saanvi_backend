@@ -54,6 +54,7 @@ Server listens on `PORT` (default `http://localhost:5000`). On startup it connec
 
 - **Root:** `GET /` — simple HTML status message  
 - **Health:** `GET /api/health` → `{ "ok": true }`
+- **Sitemap:** `GET /api/sitemap.xml` → dynamic XML (static pages + published products). Set `STOREFRONT_URL` to your shop origin.
 
 ## API overview
 
@@ -65,8 +66,10 @@ All JSON routes are under **`/api`**.
 |--------|------|---------|
 | `GET` | `/categories` | List categories |
 | `GET` | `/products` | Published products |
+| `GET` | `/products/listing` | Paginated collection grid with facets |
 | `GET` | `/products/:id` | Single published product |
 | `GET` | `/merchandising/new-arrivals` | New arrival product IDs |
+| `GET` | `/merchandising/new-arrivals/products` | New arrival products (configured order, or 6 newest) |
 
 ### Customer auth (`Authorization: Bearer <token>` where noted)
 

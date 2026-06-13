@@ -1,4 +1,5 @@
 const Product = require('../Models/Product')
+const toClientProduct = Product.toClientProduct
 const SizeChart = require('../Models/SizeChart')
 const { getOrCreateSettings } = require('./helpers/siteSettings')
 const { isValidObjectId } = require('./helpers/mongoIds')
@@ -6,6 +7,11 @@ const { parsePagination, paginatedResponse, parseSort } = require('./helpers/pag
 const { publishDueProducts } = require('./helpers/scheduledPublish')
 const { productsToCsv, importProductsFromCsv } = require('./helpers/productCsv')
 const { availableUnits } = require('./helpers/stockInventory')
+const {
+  getStorefrontListing,
+  invalidatePublishedCache,
+  loadPublishedProducts,
+} = require('./helpers/storefrontListing')
 
 function toStorefrontProduct(json) {
   const out = { ...json }
@@ -104,9 +110,13 @@ async function listCategories(_req, res) {
 }
 
 async function listPublishedProducts(_req, res) {
-  await publishDueProducts()
-  const docs = await Product.find({ published: true }).sort({ createdAt: -1 })
-  res.json({ products: docs.map((d) => toStorefrontProduct(d.toJSON())) })
+  const products = await loadPublishedProducts()
+  res.json({ products })
+}
+
+async function listPublishedProductsListing(req, res) {
+  const result = await getStorefrontListing(req.query)
+  res.json(result)
 }
 
 async function getPublishedProductById(req, res) {
@@ -138,6 +148,29 @@ async function getPublicSizeChart(req, res) {
 async function listPublicNewArrivalIds(_req, res) {
   const settings = await getOrCreateSettings()
   res.json({ ids: settings.newArrivalProductIds || [] })
+}
+
+async function listPublicNewArrivalProducts(_req, res) {
+  await publishDueProducts()
+  const settings = await getOrCreateSettings()
+  const ids = (settings.newArrivalProductIds || []).map(String).filter(Boolean)
+
+  if (ids.length > 0) {
+    const validIds = ids.filter((id) => isValidObjectId(id))
+    const docs = await Product.find({ _id: { $in: validIds }, published: true }).lean()
+    const byId = new Map(docs.map((d) => [String(d._id), d]))
+    const ordered = ids.map((id) => byId.get(id)).filter(Boolean)
+    if (ordered.length > 0) {
+      return res.json({
+        products: ordered.slice(0, 12).map((d) => toStorefrontProduct(toClientProduct(d))),
+      })
+    }
+  }
+
+  const docs = await Product.find({ published: true }).sort({ createdAt: -1 }).limit(6).lean()
+  res.json({
+    products: docs.map((d) => toStorefrontProduct(toClientProduct(d))),
+  })
 }
 
 // --- admin products ---
@@ -178,6 +211,7 @@ async function adminBulkProducts(req, res) {
   let result
   if (action === 'delete') {
     result = await Product.deleteMany({ _id: { $in: validIds } })
+    invalidatePublishedCache()
     const settings = await getOrCreateSettings()
     const idSet = new Set(validIds.map(String))
     settings.newArrivalProductIds = (settings.newArrivalProductIds || []).filter((x) => !idSet.has(x))
@@ -193,6 +227,7 @@ async function adminBulkProducts(req, res) {
     return res.status(400).json({ message: 'Unknown action' })
   }
   result = await Product.updateMany({ _id: { $in: validIds } }, { $set: updates })
+  invalidatePublishedCache()
   res.json({ modified: result.modifiedCount })
 }
 
@@ -237,6 +272,7 @@ async function adminCreateProduct(req, res) {
     seoKeywords: Array.isArray(body.seoKeywords) ? body.seoKeywords : [],
     shipping: body.shipping,
   })
+  invalidatePublishedCache()
   res.status(201).json(doc.toJSON())
 }
 
@@ -312,6 +348,7 @@ async function adminUpdateProduct(req, res) {
   if (!doc) {
     return res.status(404).json({ message: 'Product not found' })
   }
+  invalidatePublishedCache()
   res.json(doc.toJSON())
 }
 
@@ -334,6 +371,7 @@ async function adminDuplicateProduct(req, res) {
   copy.publishAt = null
   copy.featured = false
   const newDoc = await Product.create(copy)
+  invalidatePublishedCache()
   res.status(201).json(newDoc.toJSON())
 }
 
@@ -351,6 +389,7 @@ async function adminImportProducts(req, res) {
     return res.status(400).json({ message: 'csv string required in request body' })
   }
   const result = await importProductsFromCsv(csv)
+  invalidatePublishedCache()
   res.json(result)
 }
 
@@ -367,6 +406,7 @@ async function adminDeleteProduct(req, res) {
   const sid = String(id)
   settings.newArrivalProductIds = (settings.newArrivalProductIds || []).filter((x) => x !== sid)
   await settings.save()
+  invalidatePublishedCache()
   res.status(204).end()
 }
 
@@ -411,9 +451,11 @@ async function adminSaveNewArrivalIds(req, res) {
 module.exports = {
   listCategories,
   listPublishedProducts,
+  listPublishedProductsListing,
   getPublishedProductById,
   getPublicSizeChart,
   listPublicNewArrivalIds,
+  listPublicNewArrivalProducts,
   adminListProducts,
   adminGetProduct,
   adminBulkProducts,

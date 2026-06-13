@@ -1,13 +1,16 @@
-require('dotenv').config({ override: true })
+const path = require('path')
+require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
 const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
+const compression = require('compression')
 const { connectDb } = require('./DB/connection')
 const apiRouter = require('./Routes/router')
 
 const app = express()
 app.set('trust proxy', 1)
 app.use(helmet())
+app.use(compression())
 
 function allowedOriginsFromEnv() {
   const raw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim()

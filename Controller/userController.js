@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
+const { OAuth2Client } = require('google-auth-library')
 const mongoose = require('mongoose')
 const Admin = require('../Models/Admin')
 const Customer = require('../Models/Customer')
@@ -241,7 +242,11 @@ async function customerLogin(req, res) {
   }
   const customer = await Customer.findOne({ email }).select('+passwordHash')
   if (!customer) {
-    return res.status(401).json({ message: 'Invalid email or password' })
+    return res.status(404).json({
+      message: 'No account found with this email. Please register to continue.',
+      code: 'REGISTRATION_REQUIRED',
+      email,
+    })
   }
   if (customer.disabled) {
     return res.status(403).json({ message: 'Account is disabled' })
@@ -252,6 +257,112 @@ async function customerLogin(req, res) {
   if (!(await bcrypt.compare(password, customer.passwordHash))) {
     return res.status(401).json({ message: 'Invalid email or password' })
   }
+  const token = signCustomerToken(customer, secret)
+  res.json({ token, user: customerPublicJson(customer) })
+}
+
+async function customerGoogleLogin(req, res) {
+  const secret = process.env.JWT_SECRET
+  const googleClientId = process.env.GOOGLE_CLIENT_ID
+  if (!secret) {
+    return res.status(500).json({ message: 'Server missing JWT_SECRET' })
+  }
+  if (!googleClientId) {
+    return res.status(503).json({ message: 'Google sign-in is not configured' })
+  }
+  const credential = String(req.body?.credential || '').trim()
+  if (!credential) {
+    return res.status(400).json({ message: 'Google credential required' })
+  }
+
+  let payload
+  try {
+    const client = new OAuth2Client(googleClientId)
+    const ticket = await client.verifyIdToken({
+      idToken: credential,
+      audience: googleClientId,
+    })
+    payload = ticket.getPayload()
+  } catch {
+    return res.status(401).json({ message: 'Invalid Google sign-in' })
+  }
+
+  if (!payload?.email_verified) {
+    return res.status(401).json({ message: 'Google email not verified' })
+  }
+
+  const googleId = String(payload.sub || '').trim()
+  const email = normalizeEmail(payload.email)
+  if (!googleId || !email) {
+    return res.status(400).json({ message: 'Google account email required' })
+  }
+
+  const intent = String(req.body?.intent || 'login').toLowerCase() === 'register' ? 'register' : 'login'
+  const googleFirstName = String(payload.given_name || '').trim()
+  const googleLastName = String(payload.family_name || '').trim()
+
+  let customer = await Customer.findOne({ googleId })
+  if (!customer) {
+    customer = await Customer.findOne({ email })
+    if (customer) {
+      if (customer.disabled) {
+        return res.status(403).json({ message: 'Account is disabled' })
+      }
+      if (customer.googleId && customer.googleId !== googleId) {
+        return res.status(409).json({ message: 'This email is linked to another Google account' })
+      }
+      if (!customer.googleId) {
+        customer.googleId = googleId
+        if (!customer.firstName && googleFirstName) {
+          customer.firstName = googleFirstName
+        }
+        if (!customer.lastName && googleLastName) {
+          customer.lastName = googleLastName
+        }
+        if (!customer.name) {
+          customer.name =
+            Customer.buildDisplayName(customer.firstName, customer.lastName) ||
+            String(payload.name || '').trim()
+        }
+        await customer.save()
+      }
+    } else if (intent === 'register') {
+      const name =
+        Customer.buildDisplayName(googleFirstName, googleLastName) || String(payload.name || '').trim()
+      const createdAt = new Date().toISOString().slice(0, 10)
+      try {
+        customer = await Customer.create({
+          email,
+          googleId,
+          firstName: googleFirstName,
+          lastName: googleLastName,
+          name,
+          createdAt,
+          disabled: false,
+        })
+      } catch (err) {
+        if (err.code === 11000) {
+          customer = await Customer.findOne({ email })
+          if (!customer) throw err
+        } else {
+          throw err
+        }
+      }
+    } else {
+      return res.status(404).json({
+        message: 'This Google account is not registered. Please complete registration to continue.',
+        code: 'REGISTRATION_REQUIRED',
+        email,
+        firstName: googleFirstName,
+        lastName: googleLastName,
+      })
+    }
+  }
+
+  if (customer.disabled) {
+    return res.status(403).json({ message: 'Account is disabled' })
+  }
+
   const token = signCustomerToken(customer, secret)
   res.json({ token, user: customerPublicJson(customer) })
 }
@@ -1830,6 +1941,7 @@ async function adminGetCourierStatus(_req, res) {
 module.exports = {
   customerRegister,
   customerLogin,
+  customerGoogleLogin,
   customerForgotPasswordRequest,
   customerForgotPasswordVerifyOtp,
   customerForgotPasswordReset,
