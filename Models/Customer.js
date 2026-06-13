@@ -17,6 +17,7 @@ const addressSchema = new mongoose.Schema(
 
 const customerSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  googleId: { type: String, unique: true, sparse: true, trim: true },
   passwordHash: { type: String, select: false },
   firstName: { type: String, default: '', trim: true },
   lastName: { type: String, default: '', trim: true },
