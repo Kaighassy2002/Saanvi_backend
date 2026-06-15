@@ -85,10 +85,17 @@ async function syncLatestPaymentStatus(orderPublicId, orderPaymentStatus) {
   return latest
 }
 
+async function findPaymentByRazorpayId(razorpayPaymentId) {
+  const id = String(razorpayPaymentId || '').trim()
+  if (!id) return null
+  return Payment.findOne({ razorpayPaymentId: id, provider: 'razorpay' })
+}
+
 module.exports = {
   createPaymentForOrder,
   listPaymentsForOrderPublicId,
   syncLatestPaymentStatus,
+  findPaymentByRazorpayId,
   orderPaymentStatusToRecordStatus,
   recordStatusToOrderPaymentStatus,
   resolveProvider,

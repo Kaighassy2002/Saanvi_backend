@@ -81,9 +81,14 @@ const siteSettingsSchema = new mongoose.Schema({
   codEnabled: { type: Boolean, default: true },
   /** WhatsApp digits with country code, e.g. 919876543210 */
   whatsappPhone: { type: String, default: '' },
-  /** Top announcement bar — empty uses default free-shipping message */
+  /** Top announcement bar — see announcementBar.js defaults */
+  announcementEnabled: { type: Boolean, default: true },
+  announcementExtraMessage: { type: String, default: '' },
   announcementMessage: { type: String, default: '' },
-  instagramUrl: { type: String, default: '' },
+  announcementLinkLabel: { type: String, default: '' },
+  announcementLinkUrl: { type: String, default: '/collections' },
+  announcementShowIcon: { type: Boolean, default: true },
+  instagramUrl: { type: String, default: 'https://instagram.com/aashmikadesigns' },
   shippingFee: { type: Number, min: 0 },
   freeShippingThreshold: { type: Number, min: 0 },
 })

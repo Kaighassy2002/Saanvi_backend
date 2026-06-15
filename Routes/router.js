@@ -1,4 +1,7 @@
 const express = require('express')
+const mongoose = require('mongoose')
+const { clientErrorMessage } = require('../Controller/helpers/httpError')
+const { captureServerError } = require('../config/sentry')
 const { requireAdmin } = require('../middleware/authAdmin')
 const { requireCustomer } = require('../middleware/authCustomer')
 const { asyncHandler } = require('../Controller/helpers/asyncHandler')
@@ -18,24 +21,63 @@ const sizeChartController = require('../Controller/sizeChartController')
 const couponController = require('../Controller/couponController')
 const seoController = require('../Controller/seoController')
 const { optionalCustomer } = require('../middleware/optionalCustomer')
-const { authLimiter, forgotPasswordLimiter, orderLimiter } = require('../middleware/rateLimits')
+const {
+  authLimiter,
+  forgotPasswordLimiter,
+  orderLimiter,
+  adminApiLimiter,
+  publicApiLimiter,
+} = require('../middleware/rateLimits')
 const { cachePublic } = require('../middleware/cachePublic')
 
 const router = express.Router()
 
 router.get('/health', (_req, res) => {
-  res.json({ ok: true })
+  const dbOk = mongoose.connection.readyState === 1
+  res.status(dbOk ? 200 : 503).json({
+    ok: dbOk,
+    db: dbOk ? 'connected' : 'disconnected',
+  })
 })
 
-router.get('/sitemap.xml', cachePublic(3600), asyncHandler(seoController.getSitemapXml))
+router.get('/sitemap.xml', cachePublic(3600), publicApiLimiter, asyncHandler(seoController.getSitemapXml))
 
-router.get('/categories', asyncHandler(productController.listCategories))
-router.get('/catalog/categories', asyncHandler(categoryController.listPublicCategories))
-router.get('/products/listing', cachePublic(30), asyncHandler(productController.listPublishedProductsListing))
-router.get('/products', cachePublic(60), asyncHandler(productController.listPublishedProducts))
-router.get('/products/reviews/summaries', asyncHandler(reviewController.reviewSummaries))
-router.get('/size-charts/:id', asyncHandler(productController.getPublicSizeChart))
-router.get('/products/:id', asyncHandler(productController.getPublishedProductById))
+router.get('/categories', publicApiLimiter, asyncHandler(productController.listCategories))
+router.get('/catalog/categories', publicApiLimiter, asyncHandler(categoryController.listPublicCategories))
+router.get(
+  '/products/listing',
+  publicApiLimiter,
+  cachePublic(30),
+  asyncHandler(productController.listPublishedProductsListing)
+)
+router.get(
+  '/products/search',
+  publicApiLimiter,
+  cachePublic(30),
+  asyncHandler(productController.searchPublishedProducts)
+)
+router.get(
+  '/products/featured',
+  publicApiLimiter,
+  cachePublic(60),
+  asyncHandler(productController.listFeaturedPublishedProducts)
+)
+router.get(
+  '/products/best-sellers',
+  publicApiLimiter,
+  cachePublic(60),
+  asyncHandler(productController.listBestSellerPublishedProducts)
+)
+router.get('/products', publicApiLimiter, cachePublic(60), asyncHandler(productController.listPublishedProducts))
+router.get('/products/reviews/summaries', publicApiLimiter, asyncHandler(reviewController.reviewSummaries))
+router.get('/size-charts/:id', publicApiLimiter, asyncHandler(productController.getPublicSizeChart))
+router.get(
+  '/products/:id/related',
+  publicApiLimiter,
+  cachePublic(60),
+  asyncHandler(productController.listRelatedPublishedProducts)
+)
+router.get('/products/:id', publicApiLimiter, asyncHandler(productController.getPublishedProductById))
 router.get(
   '/products/:id/reviews',
   optionalCustomer,
@@ -46,10 +88,23 @@ router.post(
   requireCustomer,
   asyncHandler(reviewController.createProductReview)
 )
-router.get('/merchandising/new-arrivals/products', asyncHandler(productController.listPublicNewArrivalProducts))
-router.get('/merchandising/new-arrivals', asyncHandler(productController.listPublicNewArrivalIds))
-router.get('/store-settings', cachePublic(60), asyncHandler(settingsController.getPublicStoreSettings))
-router.get('/payments/razorpay-config', asyncHandler(paymentsController.getRazorpayConfig))
+router.get(
+  '/merchandising/new-arrivals/products',
+  publicApiLimiter,
+  asyncHandler(productController.listPublicNewArrivalProducts)
+)
+router.get(
+  '/merchandising/new-arrivals',
+  publicApiLimiter,
+  asyncHandler(productController.listPublicNewArrivalIds)
+)
+router.get(
+  '/store-settings',
+  publicApiLimiter,
+  cachePublic(60),
+  asyncHandler(settingsController.getPublicStoreSettings)
+)
+router.get('/payments/razorpay-config', publicApiLimiter, asyncHandler(paymentsController.getRazorpayConfig))
 
 router.post('/auth/register', authLimiter, asyncHandler(userController.customerRegister))
 router.post('/auth/login', authLimiter, asyncHandler(userController.customerLogin))
@@ -68,13 +123,17 @@ router.get('/auth/orders/:id', requireCustomer, asyncHandler(userController.cust
 router.post('/auth/orders/:id/cancel-request', requireCustomer, asyncHandler(userController.customerRequestCancel))
 router.post('/auth/orders/:id/return-request', requireCustomer, asyncHandler(userController.customerRequestReturn))
 
+router.post('/orders/quote', orderLimiter, requireCustomer, asyncHandler(userController.customerQuoteCheckout))
 router.post('/orders', orderLimiter, requireCustomer, asyncHandler(userController.customerPlaceOrder))
 router.post('/orders/razorpay-order', orderLimiter, requireCustomer, asyncHandler(userController.createRazorpayOrder))
 router.post('/orders/razorpay-verify', orderLimiter, requireCustomer, asyncHandler(userController.verifyRazorpayPayment))
 
+router.post('/coupons/quote', orderLimiter, requireCustomer, asyncHandler(couponController.storefrontQuoteCoupon))
+
 router.post('/admin/auth/login', authLimiter, asyncHandler(userController.adminLogin))
 
 const admin = express.Router()
+admin.use(adminApiLimiter)
 admin.use(requireAdmin)
 
 admin.get('/upload/cloudinary-signature', asyncHandler(uploadController.adminGetCloudinarySignature))
@@ -164,7 +223,8 @@ router.use((err, _req, res, _next) => {
   if (err.name === 'CastError') {
     return res.status(400).json({ message: 'Invalid id' })
   }
-  res.status(500).json({ message: err.message || 'Server error' })
+  captureServerError(err, { tags: { source: 'api-router' } })
+  res.status(500).json({ message: clientErrorMessage(err) })
 })
 
 module.exports = router

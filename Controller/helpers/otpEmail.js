@@ -156,19 +156,20 @@ async function sendAdminLowStockEmail({
   const res = Number(reserved) || 0
   const variantLine = variant ? ` · ${variant}` : ''
 
-  await transporter.sendMail({
-    from,
-    to,
-    subject: `Low stock: ${name}${variantLine}`,
-    text: [
-      `Reorder alert — ${name}${variantLine}`,
-      `SKU: ${skuLabel}`,
-      `Available: ${avail} (on hand ${hand}, reserved ${res})`,
-      `Threshold: ${thresh}`,
-      '',
-      'Open admin → Inventory to restock or adjust counts.',
-    ].join('\n'),
-    html: `
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject: `Low stock: ${name}${variantLine}`,
+      text: [
+        `Reorder alert — ${name}${variantLine}`,
+        `SKU: ${skuLabel}`,
+        `Available: ${avail} (on hand ${hand}, reserved ${res})`,
+        `Threshold: ${thresh}`,
+        '',
+        'Open admin → Inventory to restock or adjust counts.',
+      ].join('\n'),
+      html: `
       <div style="font-family:Arial,sans-serif;line-height:1.5;color:#222">
         <h2 style="margin:0 0 12px;">Low stock — reorder needed</h2>
         <p style="margin:0 0 6px;"><strong>Product:</strong> ${name}${variant ? ` (${variant})` : ''}</p>
@@ -178,8 +179,12 @@ async function sendAdminLowStockEmail({
         <p style="margin:0;">Sign in to admin → <strong>Inventory</strong> to restock.</p>
       </div>
     `,
-  })
-  return true
+    })
+    return true
+  } catch (err) {
+    console.error('Low stock alert email failed:', err.message)
+    return false
+  }
 }
 
 function orderEmailShell({ title, bodyHtml, bodyText }) {

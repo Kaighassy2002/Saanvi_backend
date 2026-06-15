@@ -10,6 +10,8 @@ const orderSchema = new mongoose.Schema({
   paymentStatus: { type: String, default: 'pending' },
   subtotal: { type: Number, default: 0 },
   shippingFee: { type: Number, default: 0 },
+  couponCode: { type: String, default: '' },
+  couponDiscount: { type: Number, default: 0 },
   total: { type: Number, default: 0 },
   customerEmail: { type: String, default: '' },
   customerName: { type: String, default: '' },

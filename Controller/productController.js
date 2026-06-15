@@ -7,14 +7,22 @@ const { parsePagination, paginatedResponse, parseSort } = require('./helpers/pag
 const { publishDueProducts } = require('./helpers/scheduledPublish')
 const { productsToCsv, importProductsFromCsv } = require('./helpers/productCsv')
 const { availableUnits } = require('./helpers/stockInventory')
+const { escapeRegex } = require('./helpers/safeRegex')
+const { sanitizeProductVariants, sanitizeVariantList } = require('./helpers/productVariantSanitize')
 const {
   getStorefrontListing,
   invalidatePublishedCache,
   loadPublishedProducts,
+  parseDiscoveryLimit,
+  searchPublishedCatalog,
+  getFeaturedPublishedProducts,
+  getBestSellerPublishedProducts,
+  getRelatedPublishedProducts,
 } = require('./helpers/storefrontListing')
 
 function toStorefrontProduct(json) {
-  const out = { ...json }
+  const safe = sanitizeProductVariants(json)
+  const out = { ...safe }
   out.stock = availableUnits(json.stock, json.reservedStock)
   delete out.reservedStock
   if (Array.isArray(out.variants)) {
@@ -85,10 +93,11 @@ function buildProductFilter(query) {
   const filter = {}
   const q = String(query.q || '').trim()
   if (q) {
+    const safeQ = escapeRegex(q)
     filter.$or = [
-      { name: { $regex: q, $options: 'i' } },
-      { sku: { $regex: q, $options: 'i' } },
-      { category: { $regex: q, $options: 'i' } },
+      { name: { $regex: safeQ, $options: 'i' } },
+      { sku: { $regex: safeQ, $options: 'i' } },
+      { category: { $regex: safeQ, $options: 'i' } },
     ]
   }
   if (query.category) filter.category = String(query.category).trim()
@@ -119,17 +128,45 @@ async function listPublishedProductsListing(req, res) {
   res.json(result)
 }
 
+async function searchPublishedProducts(req, res) {
+  const limit = parseDiscoveryLimit(req.query.limit, 6, 12)
+  const result = await searchPublishedCatalog(req.query.q, limit)
+  res.json(result)
+}
+
+async function listFeaturedPublishedProducts(req, res) {
+  const limit = parseDiscoveryLimit(req.query.limit, 10, 24)
+  const products = await getFeaturedPublishedProducts(limit)
+  res.json({ products })
+}
+
+async function listBestSellerPublishedProducts(req, res) {
+  const limit = parseDiscoveryLimit(req.query.limit, 10, 24)
+  const products = await getBestSellerPublishedProducts(limit)
+  res.json({ products })
+}
+
+async function listRelatedPublishedProducts(req, res) {
+  const { id } = req.params
+  if (!isValidObjectId(id)) {
+    return res.status(404).json({ message: 'Product not found' })
+  }
+  const limit = parseDiscoveryLimit(req.query.limit, 4, 12)
+  const products = await getRelatedPublishedProducts(id, limit)
+  res.json({ products })
+}
+
 async function getPublishedProductById(req, res) {
   await publishDueProducts()
   const { id } = req.params
   if (!isValidObjectId(id)) {
     return res.status(404).json({ message: 'Product not found' })
   }
-  const doc = await Product.findById(id)
+  const doc = await Product.findById(id).lean()
   if (!doc || doc.published === false) {
     return res.status(404).json({ message: 'Product not found' })
   }
-  const json = await attachSizeChart(toStorefrontProduct(doc.toJSON()))
+  const json = await attachSizeChart(toStorefrontProduct(toClientProduct(doc)))
   res.json(json)
 }
 
@@ -192,11 +229,11 @@ async function adminGetProduct(req, res) {
   if (!isValidObjectId(id)) {
     return res.status(404).json({ message: 'Product not found' })
   }
-  const doc = await Product.findById(id)
+  const doc = await Product.findById(id).lean()
   if (!doc) {
     return res.status(404).json({ message: 'Product not found' })
   }
-  res.json(doc.toJSON())
+  res.json(toClientProduct(doc))
 }
 
 async function adminBulkProducts(req, res) {
@@ -259,7 +296,7 @@ async function adminCreateProduct(req, res) {
     sizeOptions: Array.isArray(body.sizeOptions) ? body.sizeOptions : [],
     dimensions: body.dimensions,
     customAttributes: Array.isArray(body.customAttributes) ? body.customAttributes : [],
-    variants: Array.isArray(body.variants) ? body.variants : [],
+    variants: sanitizeVariantList(body.variants),
     stock: body.stock != null ? body.stock : 10,
     lowStockThreshold: body.lowStockThreshold != null ? body.lowStockThreshold : 5,
     published: scheduled ? false : body.published !== false,
@@ -300,7 +337,7 @@ async function adminUpdateProduct(req, res) {
   if (body.sizeOptions !== undefined) updates.sizeOptions = body.sizeOptions
   if (body.dimensions !== undefined) updates.dimensions = body.dimensions
   if (body.customAttributes !== undefined) updates.customAttributes = body.customAttributes
-  if (body.variants !== undefined) updates.variants = body.variants
+  if (body.variants !== undefined) updates.variants = sanitizeVariantList(body.variants)
   if (body.stock !== undefined) updates.stock = body.stock
   if (body.lowStockThreshold !== undefined) updates.lowStockThreshold = body.lowStockThreshold
   if (body.metalValue !== undefined) updates.metalValue = Number(body.metalValue) || 0
@@ -370,6 +407,7 @@ async function adminDuplicateProduct(req, res) {
   copy.published = false
   copy.publishAt = null
   copy.featured = false
+  copy.variants = sanitizeVariantList(copy.variants)
   const newDoc = await Product.create(copy)
   invalidatePublishedCache()
   res.status(201).json(newDoc.toJSON())
@@ -452,6 +490,10 @@ module.exports = {
   listCategories,
   listPublishedProducts,
   listPublishedProductsListing,
+  searchPublishedProducts,
+  listFeaturedPublishedProducts,
+  listBestSellerPublishedProducts,
+  listRelatedPublishedProducts,
   getPublishedProductById,
   getPublicSizeChart,
   listPublicNewArrivalIds,

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken')
+const Customer = require('../Models/Customer')
 
-function requireCustomer(req, res, next) {
+async function requireCustomer(req, res, next) {
   const secret = process.env.JWT_SECRET
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
@@ -20,9 +21,13 @@ function requireCustomer(req, res, next) {
     if (!sub) {
       return res.status(403).json({ message: 'Invalid token' })
     }
+    const customer = await Customer.findById(sub).select('disabled email').lean()
+    if (!customer || customer.disabled) {
+      return res.status(403).json({ message: 'Account is disabled or not found' })
+    }
     req.customer = {
       sub: String(sub),
-      email: payload.email,
+      email: customer.email || payload.email,
       role: 'customer',
     }
     next()

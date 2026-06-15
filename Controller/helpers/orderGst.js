@@ -65,7 +65,9 @@ function buildGstInvoiceData(order, settings = {}) {
 
   const subtotalGross = round2(lines.reduce((s, l) => s + l.gross, 0))
   const shippingFee = round2(Number(order.shippingFee) || 0)
-  const orderTotal = round2(Number(order.total) || subtotalGross + shippingFee)
+  const couponDiscount = round2(Number(order.couponDiscount) || 0)
+  const couponCode = String(order.couponCode || '').trim()
+  const orderTotal = round2(Number(order.total) || Math.max(0, subtotalGross - couponDiscount) + shippingFee)
 
   const itemsTaxable = round2(lines.reduce((s, l) => s + l.taxable, 0))
   const itemsGst = round2(lines.reduce((s, l) => s + l.gstAmount, 0))
@@ -91,6 +93,8 @@ function buildGstInvoiceData(order, settings = {}) {
     lines,
     subtotalGross,
     shippingFee,
+    couponDiscount,
+    couponCode,
     orderTotal,
     itemsTaxable,
     itemsGst,

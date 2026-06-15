@@ -80,15 +80,20 @@ async function maybeSendReorderAlert(productDoc, variantName = '') {
   const productId = String(productDoc._id || productDoc.id)
   if (await wasReorderAlertSentRecently(productId, vName)) return
 
-  const sent = await sendAdminLowStockEmail({
-    productName: name,
-    sku,
-    variantName: vName,
-    available,
-    threshold,
-    onHand: stock,
-    reserved,
-  })
+  let sent = false
+  try {
+    sent = await sendAdminLowStockEmail({
+      productName: name,
+      sku,
+      variantName: vName,
+      available,
+      threshold,
+      onHand: stock,
+      reserved,
+    })
+  } catch (err) {
+    console.error('Low stock alert email failed:', err?.message || err)
+  }
 
   if (sent) {
     await recordStockMovement({

@@ -119,6 +119,12 @@ const productSchema = new mongoose.Schema(
   { timestamps: true }
 )
 
+const { sanitizeVariantList } = require('../Controller/helpers/productVariantSanitize')
+
+productSchema.pre('save', function sanitizeVariantsBeforeSave() {
+  this.variants = sanitizeVariantList(this.variants)
+})
+
 function normalizeCertification(raw) {
   const c = raw && typeof raw === 'object' ? raw : {}
   return {
@@ -187,25 +193,7 @@ function toClientProduct(doc) {
           .map((x) => ({ key: String(x?.key || '').trim(), value: String(x?.value || '').trim() }))
           .filter((x) => x.key && x.value)
       : [],
-    variants: Array.isArray(plain.variants)
-      ? plain.variants.map((v) => ({
-          name: v?.name || '',
-          sku: v?.sku || '',
-          price: Number(v?.price) || 0,
-          stock: Number(v?.stock) || 0,
-          reservedStock: Number(v?.reservedStock) || 0,
-          images: Array.isArray(v?.images) ? v.images.filter(Boolean) : [],
-          attributes: Array.isArray(v?.attributes)
-            ? v.attributes
-                .map((x) => ({
-                  key: String(x?.key || '').trim(),
-                  value: String(x?.value || '').trim(),
-                }))
-                .filter((x) => x.key && x.value)
-            : [],
-          certification: normalizeCertification(v?.certification),
-        }))
-      : [],
+    variants: sanitizeVariantList(plain.variants),
     stock: plain.stock != null ? Number(plain.stock) : 10,
     reservedStock: plain.reservedStock != null ? Number(plain.reservedStock) : 0,
     lowStockThreshold: plain.lowStockThreshold != null ? Number(plain.lowStockThreshold) : 5,

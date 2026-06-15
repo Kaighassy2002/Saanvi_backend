@@ -1,7 +1,17 @@
+const mongoose = require('mongoose')
 const Product = require('../Models/Product')
+const toClientProduct = Product.toClientProduct
 const StockMovement = require('../Models/StockMovement')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { recordStockMovement, maybeSendReorderAlert } = require('./helpers/stockInventory')
+const {
+  sanitizeProductVariants,
+  persistSanitizedVariants,
+} = require('./helpers/productVariantSanitize')
+
+function productObjectId(productId) {
+  return new mongoose.Types.ObjectId(String(productId))
+}
 
 async function adminAdjustStock(req, res) {
   const { productId, variantName, delta, reason } = req.body || {}
@@ -13,28 +23,35 @@ async function adminAdjustStock(req, res) {
     return res.status(400).json({ message: 'delta must be a non-zero number' })
   }
 
-  const doc = await Product.findById(productId)
-  if (!doc) return res.status(404).json({ message: 'Product not found' })
+  const raw = await Product.findById(productId).lean()
+  if (!raw) return res.status(404).json({ message: 'Product not found' })
+
+  const vName = String(variantName || '').trim()
+  const variants = await persistSanitizedVariants(Product, productId, raw.variants)
+  const product = sanitizeProductVariants({ ...raw, variants })
 
   let stockAfter = 0
   let reservedAfter = 0
-  const vName = String(variantName || '').trim()
 
   if (vName) {
-    const variants = Array.isArray(doc.variants) ? doc.variants.map((v) => v.toObject?.() || { ...v }) : []
     const idx = variants.findIndex((v) => String(v.name) === vName)
     if (idx < 0) return res.status(404).json({ message: 'Variant not found' })
-    variants[idx].stock = Math.max(0, (Number(variants[idx].stock) || 0) + change)
-    stockAfter = variants[idx].stock
+    stockAfter = Math.max(0, (Number(variants[idx].stock) || 0) + change)
     reservedAfter = Number(variants[idx].reservedStock) || 0
-    doc.variants = variants
+    await Product.collection.updateOne(
+      { _id: productObjectId(productId), 'variants.name': vName },
+      { $set: { 'variants.$[elem].stock': stockAfter } },
+      { arrayFilters: [{ 'elem.name': vName }] }
+    )
   } else {
-    doc.stock = Math.max(0, (Number(doc.stock) || 0) + change)
-    stockAfter = doc.stock
-    reservedAfter = Number(doc.reservedStock) || 0
+    stockAfter = Math.max(0, (Number(product.stock) || 0) + change)
+    reservedAfter = Number(product.reservedStock) || 0
+    await Product.collection.updateOne(
+      { _id: productObjectId(productId) },
+      { $set: { stock: stockAfter } }
+    )
   }
 
-  await doc.save()
   await recordStockMovement({
     productId: String(productId),
     variantName: vName,
@@ -46,9 +63,13 @@ async function adminAdjustStock(req, res) {
     stockAfter,
     reservedAfter,
   })
-  await maybeSendReorderAlert(doc, vName)
 
-  res.json(doc.toJSON())
+  const fresh = sanitizeProductVariants(
+    await Product.findById(productId).lean()
+  )
+  await maybeSendReorderAlert(fresh, vName)
+
+  res.json(toClientProduct(fresh))
 }
 
 async function adminStockMovements(req, res) {
@@ -101,17 +122,19 @@ async function adminStockTake(req, res) {
       continue
     }
 
-    const doc = await Product.findById(productId)
-    if (!doc) {
+    const raw = await Product.findById(productId).lean()
+    if (!raw) {
       results.push({ productId, variantName: vName, ok: false, message: 'Product not found' })
       continue
     }
+
+    const variants = await persistSanitizedVariants(Product, productId, raw.variants)
+    const product = sanitizeProductVariants({ ...raw, variants })
 
     let before = 0
     let reservedAfter = 0
 
     if (vName) {
-      const variants = Array.isArray(doc.variants) ? doc.variants.map((v) => v.toObject?.() || { ...v }) : []
       const idx = variants.findIndex((v) => String(v.name) === vName)
       if (idx < 0) {
         results.push({ productId, variantName: vName, ok: false, message: 'Variant not found' })
@@ -119,16 +142,21 @@ async function adminStockTake(req, res) {
       }
       before = Number(variants[idx].stock) || 0
       reservedAfter = Number(variants[idx].reservedStock) || 0
-      variants[idx].stock = counted
-      doc.variants = variants
+      await Product.collection.updateOne(
+        { _id: productObjectId(productId), 'variants.name': vName },
+        { $set: { 'variants.$[elem].stock': counted } },
+        { arrayFilters: [{ 'elem.name': vName }] }
+      )
     } else {
-      before = Number(doc.stock) || 0
-      reservedAfter = Number(doc.reservedStock) || 0
-      doc.stock = counted
+      before = Number(product.stock) || 0
+      reservedAfter = Number(product.reservedStock) || 0
+      await Product.collection.updateOne(
+        { _id: productObjectId(productId) },
+        { $set: { stock: counted } }
+      )
     }
 
     const delta = counted - before
-    await doc.save()
 
     if (delta !== 0) {
       await recordStockMovement({
@@ -142,7 +170,8 @@ async function adminStockTake(req, res) {
         stockAfter: counted,
         reservedAfter,
       })
-      await maybeSendReorderAlert(doc, vName)
+      const fresh = sanitizeProductVariants(await Product.findById(productId).lean())
+      await maybeSendReorderAlert(fresh, vName)
     }
 
     results.push({

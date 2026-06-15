@@ -5,15 +5,18 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node index.js",
+    "test": "node --test tests/*.test.js",
+    "test:smoke": "node ../scripts/phase1-smoke-test.mjs",
     "clear:products": "node seed/clearProducts.js",
-    "migrate:payments": "node seed/migrateOrderPayments.js"
+    "migrate:payments": "node seed/migrateOrderPayments.js",
+    "repair:variants": "node seed/repairProductVariants.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@sentry/node": "^10.57.0",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",
     "compression": "^1.8.1",

@@ -1,5 +1,6 @@
 const Coupon = require('../Models/Coupon')
 const { isValidObjectId } = require('./helpers/mongoIds')
+const { quoteCheckout } = require('./helpers/checkoutQuote')
 
 async function adminListCoupons(_req, res) {
   const docs = await Coupon.find().sort({ createdAt: -1 })
@@ -46,9 +47,35 @@ async function adminDeleteCoupon(req, res) {
   res.status(204).end()
 }
 
+async function storefrontQuoteCoupon(req, res) {
+  const body = req.body || {}
+  const items = Array.isArray(body.items) ? body.items : []
+  if (items.length === 0) {
+    return res.status(400).json({ message: 'Cart items required' })
+  }
+  const code = String(body.code || '').trim()
+  if (!code) {
+    return res.status(400).json({ message: 'Coupon code required' })
+  }
+  try {
+    const quote = await quoteCheckout(items, { couponCode: code, decrement: false })
+    res.json({
+      valid: true,
+      code: quote.couponCode,
+      discount: quote.couponDiscount,
+      subtotal: quote.subtotal,
+      shippingFee: quote.shippingFee,
+      total: quote.total,
+    })
+  } catch (err) {
+    res.status(400).json({ valid: false, message: err?.message || 'Coupon could not be applied' })
+  }
+}
+
 module.exports = {
   adminListCoupons,
   adminCreateCoupon,
   adminUpdateCoupon,
   adminDeleteCoupon,
+  storefrontQuoteCoupon,
 }

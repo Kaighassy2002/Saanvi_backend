@@ -16,7 +16,9 @@ const {
   sendOrderRefundEmail,
   sendAdminReturnRequestEmail,
 } = require('./helpers/otpEmail')
+const { codPaymentBlockedMessage } = require('./helpers/checkoutPolicy')
 const { isValidObjectId } = require('./helpers/mongoIds')
+const { isProduction } = require('../config/isProduction')
 const { getShippingSettings, computeShippingFee } = require('./helpers/siteSettings')
 const {
   RAZORPAY_CURRENCY,
@@ -37,6 +39,7 @@ const {
   createPaymentForOrder,
   listPaymentsForOrderPublicId,
   syncLatestPaymentStatus,
+  findPaymentByRazorpayId,
 } = require('./helpers/orderPayments')
 const {
   getInitialOrderState,
@@ -62,6 +65,8 @@ const {
   applyRefundToPayment,
   round2,
 } = require('./helpers/orderRefund')
+const { escapeRegex } = require('./helpers/safeRegex')
+const { quoteCheckout, incrementCouponUsage, rollbackCheckoutReservations } = require('./helpers/checkoutQuote')
 const {
   generateCourierAwb,
   isShiprocketConfigured,
@@ -75,9 +80,9 @@ const OTP_EXPIRY_MINUTES = 10
 const OTP_MAX_ATTEMPTS = 5
 const RESET_TOKEN_EXPIRY = '10m'
 
-function customerPublicJson(doc) {
+function customerPublicJson(doc, { hasPassword } = {}) {
   const o = doc.toJSON()
-  return {
+  const out = {
     id: o.id,
     email: o.email,
     name: o.name || '',
@@ -86,6 +91,10 @@ function customerPublicJson(doc) {
     phone: o.phone || '',
     addresses: Array.isArray(o.addresses) ? o.addresses : [],
   }
+  if (hasPassword !== undefined) {
+    out.hasPassword = hasPassword
+  }
+  return out
 }
 
 function signCustomerToken(customer, secret) {
@@ -109,7 +118,7 @@ function isValidEmail(email) {
 function createNumericOtp() {
   const min = 10 ** (OTP_LENGTH - 1)
   const max = 10 ** OTP_LENGTH
-  return String(Math.floor(Math.random() * (max - min)) + min)
+  return String(crypto.randomInt(min, max))
 }
 
 function sanitizeAddressEntry(row) {
@@ -181,6 +190,14 @@ function verifyClientTotal(clientTotal, serverTotal) {
   return left === right
 }
 
+function storefrontCheckoutErrorMessage(err) {
+  const msg = String(err?.message || '')
+  if (/Cast to embedded/i.test(msg) && /variants/i.test(msg)) {
+    return 'A product in your cart has invalid variant data. Remove it from your cart and try again, or contact support.'
+  }
+  return msg || 'Could not place order'
+}
+
 // --- storefront customer auth ---
 
 async function customerRegister(req, res) {
@@ -197,6 +214,9 @@ async function customerRegister(req, res) {
   const phone = String(req.body?.phone || '').trim()
   if (!email || !password) {
     return res.status(400).json({ message: 'Email and password required' })
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: 'Valid email required' })
   }
   if (!firstName) {
     return res.status(400).json({ message: 'First name required' })
@@ -242,11 +262,7 @@ async function customerLogin(req, res) {
   }
   const customer = await Customer.findOne({ email }).select('+passwordHash')
   if (!customer) {
-    return res.status(404).json({
-      message: 'No account found with this email. Please register to continue.',
-      code: 'REGISTRATION_REQUIRED',
-      email,
-    })
+    return res.status(401).json({ message: 'Invalid email or password' })
   }
   if (customer.disabled) {
     return res.status(403).json({ message: 'Account is disabled' })
@@ -493,11 +509,11 @@ async function customerForgotPasswordReset(req, res) {
 }
 
 async function customerGetMe(req, res) {
-  const customer = await Customer.findById(req.customer.sub)
+  const customer = await Customer.findById(req.customer.sub).select('+passwordHash')
   if (!customer || customer.disabled) {
     return res.status(404).json({ message: 'User not found' })
   }
-  res.json(customerPublicJson(customer))
+  res.json(customerPublicJson(customer, { hasPassword: Boolean(customer.passwordHash) }))
 }
 
 async function customerUpdateMe(req, res) {
@@ -536,8 +552,8 @@ async function customerUpdateMe(req, res) {
 
   Object.assign(customer, updates)
   await customer.save()
-  const fresh = await Customer.findById(customer._id)
-  res.json(customerPublicJson(fresh))
+  const fresh = await Customer.findById(customer._id).select('+passwordHash')
+  res.json(customerPublicJson(fresh, { hasPassword: Boolean(fresh?.passwordHash) }))
 }
 
 async function customerGetCart(req, res) {
@@ -610,13 +626,17 @@ const { logAudit } = require('./helpers/auditLog')
 async function adminListUsers(req, res) {
   const { page, limit, skip, q } = parsePagination(req.query)
   const filter = {}
+  const status = String(req.query.status || '').toLowerCase()
+  if (status === 'active') filter.disabled = { $ne: true }
+  else if (status === 'disabled') filter.disabled = true
   if (q) {
+    const safeQ = escapeRegex(q)
     filter.$or = [
-      { email: { $regex: q, $options: 'i' } },
-      { name: { $regex: q, $options: 'i' } },
-      { firstName: { $regex: q, $options: 'i' } },
-      { lastName: { $regex: q, $options: 'i' } },
-      { phone: { $regex: q, $options: 'i' } },
+      { email: { $regex: safeQ, $options: 'i' } },
+      { name: { $regex: safeQ, $options: 'i' } },
+      { firstName: { $regex: safeQ, $options: 'i' } },
+      { lastName: { $regex: safeQ, $options: 'i' } },
+      { phone: { $regex: safeQ, $options: 'i' } },
     ]
   }
   const [docs, total] = await Promise.all([
@@ -727,41 +747,9 @@ function normalizePaymentMethod(method) {
   return 'cod'
 }
 
-async function buildVerifiedOrderItems(rawItems, session) {
-  const verifiedItems = []
-  let subtotal = 0
-
-  for (const line of rawItems) {
-    const quantity = Number(line.quantity)
-    if (!Number.isFinite(quantity) || quantity < 1) {
-      throw new Error('Invalid line item quantity')
-    }
-    const resolved = await resolveAndMaybeDecrementLine(
-      Product,
-      {
-        productId: String(line.productId),
-        quantity,
-        variantKey: line.variantKey || line.variantName,
-        variantName: line.variantKey || line.variantName,
-        name: line.name,
-      },
-      { session, decrement: true }
-    )
-    subtotal += resolved.price * quantity
-    const item = {
-      productId: resolved.productId,
-      name: resolved.name,
-      quantity: resolved.quantity,
-      price: resolved.price,
-      image: resolved.image,
-    }
-    if (resolved.variantName) item.variantName = resolved.variantName
-    verifiedItems.push(item)
-  }
-
-  const shippingFee = await getShippingFee(subtotal)
-  const total = subtotal + shippingFee
-  return { verifiedItems, subtotal, shippingFee, total }
+async function buildVerifiedOrderItems(rawItems, session, couponCode = '') {
+  const quote = await quoteCheckout(rawItems, { session, decrement: true, couponCode })
+  return quote
 }
 
 async function placeOrderWithoutTransaction({
@@ -776,37 +764,20 @@ async function placeOrderWithoutTransaction({
   razorpayPaymentId = '',
   instrument = '',
 }) {
-  const reservedUndo = []
+  const couponCode = String(body.couponCode || '').trim()
+  let reservations = []
   try {
-    const verifiedItems = []
-    let subtotal = 0
-    for (const line of body.items) {
-      const quantity = Number(line.quantity)
-      const resolved = await resolveAndMaybeDecrementLine(
-        Product,
-        {
-          productId: String(line.productId),
-          quantity,
-          variantKey: line.variantKey || line.variantName,
-          variantName: line.variantKey || line.variantName,
-          name: line.name,
-        },
-        { decrement: true, orderId: publicId }
-      )
-      reservedUndo.push(resolved.undo)
-      subtotal += resolved.price * quantity
-      const item = {
-        productId: resolved.productId,
-        name: resolved.name,
-        quantity: resolved.quantity,
-        price: resolved.price,
-        image: resolved.image,
-      }
-      if (resolved.variantName) item.variantName = resolved.variantName
-      verifiedItems.push(item)
-    }
-    const shippingFee = await getShippingFee(subtotal)
-    const total = subtotal + shippingFee
+    const {
+      verifiedItems,
+      subtotal,
+      shippingFee,
+      total,
+      couponDiscount,
+      couponId,
+      couponCode: appliedCouponCode,
+      reservations: reserved,
+    } = await quoteCheckout(body.items, { decrement: true, couponCode })
+    reservations = reserved || []
     if (!verifyClientTotal(body.total, total)) {
       throw new Error('Order total mismatch. Please refresh cart and try again.')
     }
@@ -823,6 +794,8 @@ async function placeOrderWithoutTransaction({
       status,
       subtotal,
       shippingFee,
+      couponCode: appliedCouponCode || '',
+      couponDiscount,
       total,
       customerEmail: shipping.email,
       customerName,
@@ -840,6 +813,9 @@ async function placeOrderWithoutTransaction({
         by: 'system',
       }),
     })
+    if (couponId) {
+      await incrementCouponUsage(couponId)
+    }
     await createPaymentForOrder({
       orderDoc: doc,
       paymentMethod,
@@ -850,50 +826,15 @@ async function placeOrderWithoutTransaction({
     })
     return doc
   } catch (err) {
-    for (const row of reservedUndo) {
-      if (row) await undoInventoryLine(Product, row)
+    if (reservations.length) {
+      await rollbackCheckoutReservations(reservations)
     }
     throw err
   }
 }
 
-async function quoteVerifiedItems(rawItems) {
-  const quotedItems = []
-  let subtotal = 0
-  for (const line of rawItems) {
-    const quantity = Number(line.quantity)
-    if (!Number.isFinite(quantity) || quantity < 1) {
-      throw new Error('Invalid line item quantity')
-    }
-    const productId = String(line.productId)
-    if (!isValidObjectId(productId)) {
-      throw new Error('Invalid product in cart')
-    }
-    const resolved = await resolveAndMaybeDecrementLine(
-      Product,
-      {
-        productId,
-        quantity,
-        variantKey: line.variantKey || line.variantName,
-        variantName: line.variantKey || line.variantName,
-        name: line.name,
-      },
-      { decrement: false }
-    )
-    subtotal += resolved.price * quantity
-    const item = {
-      productId: resolved.productId,
-      name: resolved.name,
-      quantity: resolved.quantity,
-      price: resolved.price,
-      image: resolved.image,
-    }
-    if (resolved.variantName) item.variantName = resolved.variantName
-    quotedItems.push(item)
-  }
-  const shippingFee = await getShippingFee(subtotal)
-  const total = subtotal + shippingFee
-  return { quotedItems, subtotal, shippingFee, total }
+async function quoteVerifiedItems(rawItems, couponCode = '') {
+  return quoteCheckout(rawItems, { decrement: false, couponCode })
 }
 
 async function createPaidStorefrontOrder({
@@ -916,9 +857,18 @@ async function createPaidStorefrontOrder({
   )
   const session = await mongoose.startSession()
   let doc
+  const couponCode = String(body.couponCode || '').trim()
   try {
     session.startTransaction()
-    const { verifiedItems, subtotal, shippingFee, total } = await buildVerifiedOrderItems(body.items, session)
+    const {
+      verifiedItems,
+      subtotal,
+      shippingFee,
+      total,
+      couponDiscount,
+      couponId,
+      couponCode: appliedCouponCode,
+    } = await quoteCheckout(body.items, { session, decrement: true, couponCode })
     if (!verifyClientTotal(body.total, total)) {
       throw new Error('Order total mismatch. Please refresh cart and try again.')
     }
@@ -931,6 +881,8 @@ async function createPaidStorefrontOrder({
           status: initialStatus,
           subtotal,
           shippingFee,
+          couponCode: appliedCouponCode || '',
+          couponDiscount,
           total,
           customerEmail: shipping.email,
           customerName,
@@ -951,6 +903,9 @@ async function createPaidStorefrontOrder({
       ],
       { session }
     )
+    if (couponId) {
+      await incrementCouponUsage(couponId, session)
+    }
     await createPaymentForOrder({
       orderDoc: doc,
       paymentMethod,
@@ -968,6 +923,11 @@ async function createPaidStorefrontOrder({
       msg.includes('Transaction numbers are only allowed on a replica set member') ||
       msg.includes('Transaction support is disabled')
     if (transactionUnavailable) {
+      if (isProduction()) {
+        throw new Error(
+          'Order placement is temporarily unavailable. Database must support transactions in production.'
+        )
+      }
       doc = await placeOrderWithoutTransaction({
         body,
         shipping,
@@ -989,6 +949,35 @@ async function createPaidStorefrontOrder({
   return doc
 }
 
+async function customerQuoteCheckout(req, res) {
+  const body = req.body || {}
+  const items = Array.isArray(body.items) ? body.items : []
+  if (items.length === 0) {
+    return res.status(400).json({ message: 'Cart items required' })
+  }
+  for (const line of items) {
+    if (line == null || line.quantity == null || Number(line.quantity) < 1) {
+      return res.status(400).json({ message: 'Invalid line item quantity' })
+    }
+    if (!isValidObjectId(line.productId)) {
+      return res.status(400).json({ message: 'Invalid product in cart' })
+    }
+  }
+  const couponCode = String(body.couponCode || '').trim()
+  try {
+    const quote = await quoteVerifiedItems(items, couponCode)
+    res.json({
+      subtotal: quote.subtotal,
+      shippingFee: quote.shippingFee,
+      couponDiscount: quote.couponDiscount,
+      couponCode: quote.couponCode,
+      total: quote.total,
+    })
+  } catch (err) {
+    res.status(400).json({ message: storefrontCheckoutErrorMessage(err) })
+  }
+}
+
 async function customerPlaceOrder(req, res) {
   const errMsg = validateCheckoutPayload(req.body || {})
   if (errMsg) {
@@ -1006,6 +995,11 @@ async function customerPlaceOrder(req, res) {
     pincode: String(body.shipping.pincode).trim(),
   }
   const customerUserId = String(req.customer.sub)
+  const settings = await getOrCreateSettings()
+  const codBlocked = codPaymentBlockedMessage(settings, body.paymentMethod)
+  if (codBlocked) {
+    return res.status(400).json({ message: codBlocked })
+  }
   let doc
   try {
     doc = await createPaidStorefrontOrder({
@@ -1015,7 +1009,7 @@ async function customerPlaceOrder(req, res) {
       paymentStatus: normalizePaymentMethod(body.paymentMethod) === 'cod' ? 'pending' : 'paid',
     })
   } catch (err) {
-    return res.status(400).json({ message: err?.message || 'Could not place order' })
+    return res.status(400).json({ message: storefrontCheckoutErrorMessage(err) })
   }
 
   sendOrderConfirmationEmail({
@@ -1053,7 +1047,8 @@ async function createRazorpayOrder(req, res) {
     return res.status(503).json({ message: 'Online payment is not configured. Use Cash on Delivery or contact support.' })
   }
   const rp = razorpayClient()
-  const { subtotal, shippingFee, total } = await quoteVerifiedItems(items)
+  const couponCode = String(body.couponCode || '').trim()
+  const { subtotal, shippingFee, total } = await quoteVerifiedItems(items, couponCode)
   if (!verifyClientTotal(body.total, total)) {
     return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
   }
@@ -1121,9 +1116,23 @@ async function verifyRazorpayPayment(req, res) {
   ) {
     return res.status(400).json({ message: 'Payment verification failed' })
   }
+
+  const customerUserId = String(req.customer.sub)
+  const existingPayment = await findPaymentByRazorpayId(razorpayPaymentId)
+  if (existingPayment) {
+    const existingOrder = await Order.findOne({ publicId: existingPayment.orderPublicId })
+    if (existingOrder) {
+      if (String(existingOrder.customerUserId) !== customerUserId) {
+        return res.status(409).json({ message: 'This payment has already been processed' })
+      }
+      return res.status(200).json(existingOrder.toJSON())
+    }
+  }
+
   const rp = razorpayClient()
   try {
-    const { total } = await quoteVerifiedItems(body.items || [])
+    const couponCode = String(body.couponCode || '').trim()
+    const { total } = await quoteVerifiedItems(body.items || [], couponCode)
     if (!verifyClientTotal(body.total, total)) {
       return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
     }
@@ -1137,9 +1146,10 @@ async function verifyRazorpayPayment(req, res) {
         items: body.items,
         total: body.total,
         paymentMethod: body.paymentMethod || 'razorpay',
+        couponCode,
       },
       shipping: { firstName, lastName, email, phone, address, city, state, pincode },
-      customerUserId: String(req.customer.sub),
+      customerUserId,
       paymentStatus: 'paid',
       razorpayOrderId,
       razorpayPaymentId,
@@ -1167,6 +1177,16 @@ async function verifyRazorpayPayment(req, res) {
     })
     res.status(201).json(doc.toJSON())
   } catch (err) {
+    if (err?.code === 11000 && String(err?.message || '').includes('razorpayPaymentId')) {
+      const replayPayment = await findPaymentByRazorpayId(razorpayPaymentId)
+      const replayOrder = replayPayment
+        ? await Order.findOne({ publicId: replayPayment.orderPublicId })
+        : null
+      if (replayOrder && String(replayOrder.customerUserId) === customerUserId) {
+        return res.status(200).json(replayOrder.toJSON())
+      }
+      return res.status(409).json({ message: 'This payment has already been processed' })
+    }
     const msg = err?.message || 'Could not finalize payment order'
     const status = msg.includes('verification') || msg.includes('mismatch') ? 400 : 502
     res.status(status).json({ message: msg })
@@ -1177,10 +1197,14 @@ async function findCustomerOrderForRequest(req, orderId) {
   const sub = String(req.customer.sub)
   const customer = await Customer.findById(sub).select('email')
   const email = (customer?.email || req.customer.email || '').toLowerCase().trim()
-  const doc = await Order.findOne({
-    publicId: String(orderId),
-    $or: [{ customerUserId: sub }, { customerEmail: email }],
-  })
+  const ownerFilter = { $or: [{ customerUserId: sub }, { customerEmail: email }] }
+  const key = String(orderId || '').trim()
+  if (!key) return null
+
+  let doc = await Order.findOne({ publicId: key, ...ownerFilter })
+  if (!doc && isValidObjectId(key)) {
+    doc = await Order.findOne({ _id: key, ...ownerFilter })
+  }
   return doc
 }
 
@@ -1313,12 +1337,13 @@ function buildOrderListFilter(query) {
   }
   const q = String(query.q || '').trim()
   if (q) {
+    const safeQ = escapeRegex(q)
     filter.$or = [
-      { publicId: { $regex: q, $options: 'i' } },
-      { customerEmail: { $regex: q, $options: 'i' } },
-      { customerName: { $regex: q, $options: 'i' } },
-      { 'shipping.phone': { $regex: q, $options: 'i' } },
-      { rmaId: { $regex: q, $options: 'i' } },
+      { publicId: { $regex: safeQ, $options: 'i' } },
+      { customerEmail: { $regex: safeQ, $options: 'i' } },
+      { customerName: { $regex: safeQ, $options: 'i' } },
+      { 'shipping.phone': { $regex: safeQ, $options: 'i' } },
+      { rmaId: { $regex: safeQ, $options: 'i' } },
     ]
   }
   if (query.from || query.to) {
@@ -1409,12 +1434,15 @@ async function adminExportOrders(req, res) {
 }
 
 async function adminGetOrder(req, res) {
-  const { id } = req.params
-  const doc = await Order.findOne({ publicId: id })
+  const id = String(req.params.id || '').trim()
+  let doc = await Order.findOne({ publicId: id })
+  if (!doc && isValidObjectId(id)) {
+    doc = await Order.findById(id)
+  }
   if (!doc) {
     return res.status(404).json({ message: 'Order not found' })
   }
-  const payments = await listPaymentsForOrderPublicId(id)
+  const payments = await listPaymentsForOrderPublicId(doc.publicId)
   res.json({
     ...doc.toJSON(),
     payments: payments.map((p) => p.toJSON()),
@@ -1951,6 +1979,7 @@ module.exports = {
   customerPutCart,
   customerGetWishlist,
   customerPutWishlist,
+  customerQuoteCheckout,
   customerPlaceOrder,
   createRazorpayOrder,
   verifyRazorpayPayment,

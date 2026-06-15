@@ -13,6 +13,21 @@ const {
   sanitizeHomeSections,
 } = require('./helpers/homeContent')
 
+function announcementFieldsFromDoc(settings) {
+  const doc = settings?.toObject ? settings.toObject() : settings || {}
+  const fields = {
+    announcementEnabled: settings.announcementEnabled !== false,
+    announcementExtraMessage: settings.announcementExtraMessage || '',
+    announcementMessage: settings.announcementMessage || '',
+    announcementLinkUrl: settings.announcementLinkUrl || '/collections',
+    announcementShowIcon: settings.announcementShowIcon !== false,
+  }
+  if (Object.prototype.hasOwnProperty.call(doc, 'announcementLinkLabel')) {
+    fields.announcementLinkLabel = settings.announcementLinkLabel || ''
+  }
+  return fields
+}
+
 function publicProfileFromSettings(settings) {
   return {
     storeName: settings.storeName || '',
@@ -20,7 +35,7 @@ function publicProfileFromSettings(settings) {
     supportPhone: settings.supportPhone || '',
     storeLocation: settings.storeLocation || '',
     whatsappPhone: settings.whatsappPhone || '',
-    announcementMessage: settings.announcementMessage || '',
+    ...announcementFieldsFromDoc(settings),
     instagramUrl: settings.instagramUrl || '',
     codEnabled: settings.codEnabled !== false,
   }
@@ -88,7 +103,7 @@ function settingsToClient(settings) {
     codConfirmThreshold: settings.codConfirmThreshold != null ? settings.codConfirmThreshold : 10000,
     codEnabled: settings.codEnabled !== false,
     whatsappPhone: settings.whatsappPhone || '',
-    announcementMessage: settings.announcementMessage || '',
+    ...announcementFieldsFromDoc(settings),
     instagramUrl: settings.instagramUrl || '',
     shipping,
     newArrivalProductIds: settings.newArrivalProductIds || [],
@@ -123,7 +138,10 @@ async function adminUpdateSettings(req, res) {
     'storeState',
     'storeGstin',
     'defaultHsnCode',
+    'announcementExtraMessage',
     'announcementMessage',
+    'announcementLinkLabel',
+    'announcementLinkUrl',
     'instagramUrl',
   ]
   for (const key of stringFields) {
@@ -137,6 +155,11 @@ async function adminUpdateSettings(req, res) {
   if (body.defaultGstPercent !== undefined) settings.defaultGstPercent = Number(body.defaultGstPercent)
   if (body.codConfirmThreshold !== undefined) settings.codConfirmThreshold = Math.round(Number(body.codConfirmThreshold))
   if (body.codEnabled !== undefined) settings.codEnabled = !!body.codEnabled
+  if (body.announcementEnabled !== undefined) settings.announcementEnabled = !!body.announcementEnabled
+  if (body.announcementShowIcon !== undefined) settings.announcementShowIcon = !!body.announcementShowIcon
+  if (body.announcementLinkUrl !== undefined) {
+    settings.announcementLinkUrl = String(body.announcementLinkUrl || '').trim() || '/collections'
+  }
   if (body.newArrivalProductIds !== undefined) settings.newArrivalProductIds = body.newArrivalProductIds.map(String)
   if (body.featuredProductIds !== undefined) settings.featuredProductIds = body.featuredProductIds.map(String)
   if (body.heroSlides !== undefined) settings.heroSlides = body.heroSlides

@@ -23,10 +23,6 @@ const DEFAULT_HOME_SECTIONS = {
     title: 'Shop by category',
     linkLabel: 'All',
     linkUrl: '/collections',
-    ctaTitle: 'Discover handcrafted jewellery',
-    ctaText: 'Bridal, festive, and everyday pieces curated for you.',
-    ctaButtonLabel: 'Explore collections',
-    ctaButtonLink: '/collections',
   },
   mobileQuickShop: {
     searchPlaceholder: 'Search necklaces, rings, bridal sets…',

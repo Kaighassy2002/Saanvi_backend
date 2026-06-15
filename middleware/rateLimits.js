@@ -24,4 +24,26 @@ const orderLimiter = rateLimit({
   message: { message: 'Too many order requests. Please wait a moment and try again.' },
 })
 
-module.exports = { authLimiter, forgotPasswordLimiter, orderLimiter }
+const adminApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many admin requests. Please slow down.' },
+})
+
+const publicApiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests. Please slow down.' },
+})
+
+module.exports = {
+  authLimiter,
+  forgotPasswordLimiter,
+  orderLimiter,
+  adminApiLimiter,
+  publicApiLimiter,
+}

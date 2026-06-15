@@ -40,7 +40,10 @@ async function ensureIndexes() {
     safeCreateIndex(Order.collection, { customerEmail: 1 }),
     // publicId: unique index is already created by Order schema — do not duplicate here
     safeCreateIndex(Payment.collection, { orderPublicId: 1 }),
-    safeCreateIndex(Payment.collection, { razorpayPaymentId: 1 }),
+    safeCreateIndex(Payment.collection, { razorpayPaymentId: 1 }, {
+      unique: true,
+      partialFilterExpression: { razorpayPaymentId: { $gt: '' } },
+    }),
     safeCreateIndex(Payment.collection, { status: 1 }),
     safeCreateIndex(Payment.collection, { createdAt: -1 }),
     safeCreateIndex(Customer.collection, { email: 1 }),

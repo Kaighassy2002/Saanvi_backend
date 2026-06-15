@@ -1,68 +1,55 @@
-const path = require('path')
-require('dotenv').config({ path: path.join(__dirname, '.env'), override: true })
-const express = require('express')
-const cors = require('cors')
-const helmet = require('helmet')
-const compression = require('compression')
-const { connectDb } = require('./DB/connection')
-const apiRouter = require('./Routes/router')
+require('./instrument')
 
-const app = express()
-app.set('trust proxy', 1)
-app.use(helmet())
-app.use(compression())
+const mongoose = require('mongoose')
+const { assertEnvValid } = require('./config/validateEnv')
+const { createApp } = require('./app')
 
-function allowedOriginsFromEnv() {
-  const raw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim()
-  if (!raw) return []
-  return raw
-    .split(',')
-    .map((v) => v.trim())
-    .filter(Boolean)
+assertEnvValid()
+
+const app = createApp()
+const PORT = Number(process.env.PORT) || 5000
+let server
+
+async function start() {
+  const { connectDb } = require('./DB/connection')
+  await connectDb()
+  await require('./DB/ensureIndexes').ensureIndexes()
+  await require('./seed/seedIfNeeded')()
+
+  const { publishDueProducts } = require('./Controller/helpers/scheduledPublish')
+  publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
+  setInterval(() => {
+    publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
+  }, 60 * 1000)
+
+  server = app.listen(PORT, () => {
+    console.log(`Jewellery server started on port ${PORT}`)
+  })
 }
 
-const allowedOrigins = allowedOriginsFromEnv()
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true)
-      if (allowedOrigins.length === 0) {
-        if (origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') {
-          return cb(null, true)
-        }
-        return cb(new Error('CORS blocked for origin'))
-      }
-      if (allowedOrigins.includes(origin)) return cb(null, true)
-      return cb(new Error('CORS blocked for origin'))
-    },
+function shutdown(signal) {
+  console.log(`${signal} received — shutting down gracefully`)
+  if (!server) {
+    mongoose.disconnect().finally(() => process.exit(0))
+    return
+  }
+  server.close(() => {
+    mongoose.disconnect().finally(() => process.exit(0))
   })
-)
-app.use(express.json({ limit: '1mb' }))
-app.use('/api', apiRouter)
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout')
+    process.exit(1)
+  }, 10_000).unref()
+}
 
-const PORT = Number(process.env.PORT) || 5000
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
-app.get('/', (_req, res) => {
-  res
-    .status(200)
-    .send(`<h1 style="color:red">Jewellary Server start and waiting for client Request!!!</h1>`)
+start().catch((err) => {
+  const { captureServerError } = require('./config/sentry')
+  captureServerError(err, { tags: { source: 'startup' } })
+  console.error(err)
+  process.exit(1)
 })
 
-connectDb()
-  .then(() => require('./DB/ensureIndexes').ensureIndexes())
-  .then(() => require('./seed/seedIfNeeded')())
-  .then(() => {
-    const { publishDueProducts } = require('./Controller/helpers/scheduledPublish')
-    publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
-    setInterval(() => {
-      publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
-    }, 60 * 1000)
-
-    app.listen(PORT, () => {
-      console.log(`Jewellary Server start at port :${PORT}`)
-    })
-  })
-  .catch((err) => {
-    console.error(err)
-    process.exit(1)
-  })
+module.exports = { app, createApp }

@@ -5,7 +5,10 @@ async function connectDb() {
   if (!uri) {
     throw new Error('CONNECTION_STRING is missing in .env')
   }
-  await mongoose.connect(uri)
+  await mongoose.connect(uri, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 10_000,
+  })
   console.log('Mongodb Atlas connected with Jewellery Server')
 }
 

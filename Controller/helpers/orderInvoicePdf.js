@@ -120,6 +120,11 @@ function generateGstInvoicePdf(order, store = {}) {
       doc.text(`Shipping: ${formatInr(gst.shippingFee)}`, summaryX, y)
       y += 14
     }
+    if (gst.couponDiscount > 0) {
+      const label = gst.couponCode ? `Coupon (${gst.couponCode})` : 'Coupon discount'
+      doc.text(`${label}: −${formatInr(gst.couponDiscount)}`, summaryX, y)
+      y += 14
+    }
     doc.font('Helvetica-Bold')
     doc.text(`Grand total: ${formatInr(gst.orderTotal)}`, summaryX, y)
     doc.font('Helvetica').fontSize(8)

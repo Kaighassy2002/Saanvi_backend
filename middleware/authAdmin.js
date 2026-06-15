@@ -1,6 +1,9 @@
 const jwt = require('jsonwebtoken')
+const Admin = require('../Models/Admin')
 
-function requireAdmin(req, res, next) {
+const ALLOWED_ROLES = new Set(['admin', 'superadmin', 'owner', 'catalog', 'fulfillment', 'support'])
+
+async function requireAdmin(req, res, next) {
   const secret = process.env.JWT_SECRET
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
@@ -12,16 +15,32 @@ function requireAdmin(req, res, next) {
   const token = h.slice(7).trim()
   try {
     const payload = jwt.verify(token, secret)
-    const role = String(payload.role || '').toLowerCase()
-    const allowed = ['admin', 'superadmin', 'owner', 'catalog', 'fulfillment', 'support']
-    if (!allowed.includes(role)) {
+    const email = String(payload.email || '')
+      .toLowerCase()
+      .trim()
+    if (!email) {
+      return res.status(401).json({ message: 'Invalid or expired token' })
+    }
+    const admin = await Admin.findOne({ email }).select('email role').lean()
+    if (!admin) {
+      return res.status(401).json({ message: 'Invalid or expired token' })
+    }
+    const dbRole = String(admin.role || 'owner').toLowerCase()
+    if (!ALLOWED_ROLES.has(dbRole)) {
       return res.status(403).json({ message: 'Forbidden' })
     }
-    req.admin = payload
+    const jwtRole = String(payload.role || dbRole).toLowerCase()
+    if (!ALLOWED_ROLES.has(jwtRole)) {
+      return res.status(403).json({ message: 'Forbidden' })
+    }
+    req.admin = {
+      email: admin.email,
+      role: admin.role,
+    }
     next()
   } catch {
     return res.status(401).json({ message: 'Invalid or expired token' })
   }
 }
 
-module.exports = { requireAdmin }
+module.exports = { requireAdmin, ALLOWED_ROLES }

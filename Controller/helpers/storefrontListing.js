@@ -538,9 +538,83 @@ async function getStorefrontListing(query) {
   }
 }
 
+function parseDiscoveryLimit(raw, fallback = 10, max = 24) {
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 1) return fallback
+  return Math.min(Math.floor(n), max)
+}
+
+async function searchPublishedCatalog(query, limit = 6) {
+  const q = String(query || '').trim()
+  if (!q) return { products: [], categories: [] }
+  const [products, settings] = await Promise.all([loadPublishedProducts(), getOrCreateSettings()])
+  const matched = products.filter((p) => productMatchesSearch(p, q)).slice(0, limit)
+  const ql = q.toLowerCase()
+  const categorySet = new Set()
+  for (const product of products) {
+    const cat = product.category
+    if (cat && String(cat).toLowerCase().includes(ql)) categorySet.add(cat)
+  }
+  for (const cat of settings.categories || []) {
+    if (String(cat).toLowerCase().includes(ql)) categorySet.add(cat)
+  }
+  const categories = [...categorySet].slice(0, 4).map((name) => ({
+    name,
+    href: `/collections?category=${encodeURIComponent(name)}`,
+  }))
+  return { products: matched, categories }
+}
+
+async function getFeaturedPublishedProducts(limit = 10) {
+  const [products, settings] = await Promise.all([loadPublishedProducts(), getOrCreateSettings()])
+  const ids = (settings.featuredProductIds || []).map(String).filter(Boolean)
+  if (ids.length) {
+    const byId = new Map(products.map((p) => [String(p.id), p]))
+    const picked = ids.map((id) => byId.get(id)).filter(Boolean)
+    if (picked.length) return picked.slice(0, limit)
+  }
+  return products.filter(productIsInStock).slice(0, limit)
+}
+
+async function getBestSellerPublishedProducts(limit = 10) {
+  const products = await loadPublishedProducts()
+  return [...products]
+    .filter(productIsInStock)
+    .sort(
+      (a, b) =>
+        getDiscountRatio(b) - getDiscountRatio(a) ||
+        getProductRecencyMs(b) - getProductRecencyMs(a)
+    )
+    .slice(0, limit)
+}
+
+async function getRelatedPublishedProducts(productId, limit = 4) {
+  const products = await loadPublishedProducts()
+  const id = String(productId || '')
+  const current = products.find((p) => String(p.id) === id)
+  if (!current) return []
+  const category = String(current.category || '').trim()
+  const sameCategory = products.filter(
+    (p) =>
+      String(p.id) !== id &&
+      productIsInStock(p) &&
+      (category ? p.category === category : true)
+  )
+  const pool =
+    sameCategory.length > 0
+      ? sameCategory
+      : products.filter((p) => String(p.id) !== id && productIsInStock(p))
+  return pool.slice(0, limit)
+}
+
 module.exports = {
   getStorefrontListing,
   parseListingQuery,
   invalidatePublishedCache,
   loadPublishedProducts,
+  parseDiscoveryLimit,
+  searchPublishedCatalog,
+  getFeaturedPublishedProducts,
+  getBestSellerPublishedProducts,
+  getRelatedPublishedProducts,
 }

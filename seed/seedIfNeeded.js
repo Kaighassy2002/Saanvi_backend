@@ -1,4 +1,5 @@
 const bcrypt = require('bcryptjs')
+const { isProduction } = require('../config/isProduction')
 const Admin = require('../Models/Admin')
 const SiteSettings = require('../Models/SiteSettings')
 
@@ -14,12 +15,26 @@ const DEFAULT_CATEGORIES = [
 
 async function seedIfNeeded() {
   const email = (process.env.ADMIN_EMAIL || 'admin@jewellery.com').toLowerCase().trim()
-  const password = process.env.ADMIN_PASSWORD || 'admin123'
+  const password = process.env.ADMIN_PASSWORD
+
+  if (isProduction()) {
+    if (!password || password === 'admin123') {
+      throw new Error(
+        'ADMIN_PASSWORD must be set to a strong password before production startup (not admin123)'
+      )
+    }
+  }
+
+  const effectivePassword = password || 'admin123'
 
   if ((await Admin.countDocuments()) === 0) {
-    const passwordHash = await bcrypt.hash(password, 10)
+    const passwordHash = await bcrypt.hash(effectivePassword, 10)
     await Admin.create({ email, passwordHash })
-    console.log('Seeded admin user:', email)
+    if (!isProduction()) {
+      console.log('Seeded admin user:', email)
+    } else {
+      console.log('Seeded admin user for first production run:', email)
+    }
   }
 
   let settings = await SiteSettings.findOne()
@@ -30,13 +45,9 @@ async function seedIfNeeded() {
       shippingFee: Number(process.env.SHIPPING_FEE || 99),
       freeShippingThreshold: Number(process.env.FREE_SHIPPING_THRESHOLD || 2999),
     })
-    console.log('Seeded site settings')
-  }
-
-  // Keep production startup deterministic: no sample products, customers, or orders.
-  if (settings.newArrivalProductIds.length > 0) {
-    settings.newArrivalProductIds = []
-    await settings.save()
+    if (!isProduction()) {
+      console.log('Seeded site settings')
+    }
   }
 }
 
