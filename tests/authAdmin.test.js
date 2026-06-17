@@ -1,6 +1,6 @@
 const { describe, it } = require('node:test')
 const assert = require('node:assert/strict')
-const { ALLOWED_ROLES } = require('../middleware/authAdmin')
+const { ALLOWED_ROLES } = require('../middleware/authAdminRoles')
 
 describe('authAdmin', () => {
   it('allows known admin roles', () => {

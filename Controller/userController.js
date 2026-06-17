@@ -17,6 +17,8 @@ const {
   sendAdminReturnRequestEmail,
 } = require('./helpers/otpEmail')
 const { codPaymentBlockedMessage } = require('./helpers/checkoutPolicy')
+const { logAudit } = require('./helpers/auditLog')
+const { getEffectivePermissions, sanitizePermissions } = require('../middleware/adminPermissions')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { isProduction } = require('../config/isProduction')
 const { getShippingSettings, computeShippingFee } = require('./helpers/siteSettings')
@@ -607,21 +609,87 @@ async function adminLogin(req, res) {
     return res.status(400).json({ message: 'Email and password required' })
   }
   const admin = await Admin.findOne({ email })
-  if (!admin || !(await bcrypt.compare(password, admin.passwordHash))) {
+  if (!admin || admin.disabled || !(await bcrypt.compare(password, admin.passwordHash))) {
     return res.status(401).json({ message: 'Invalid email or password' })
   }
   const role = admin.role || 'owner'
+  const effectivePermissions = [...getEffectivePermissions(admin)]
   const token = jwt.sign({ role, email: admin.email }, secret, { expiresIn: '7d' })
   res.json({
     token,
-    user: { email: admin.email, role },
+    user: {
+      email: admin.email,
+      role,
+      name: admin.name || '',
+      permissions: sanitizePermissions(admin.permissions),
+      effectivePermissions,
+    },
   })
+}
+
+async function adminGetMe(req, res) {
+  const email = String(req.admin?.email || '')
+    .toLowerCase()
+    .trim()
+  const admin = await Admin.findOne({ email }).select('email role name permissions disabled').lean()
+  if (!admin || admin.disabled) {
+    return res.status(401).json({ message: 'Account not found' })
+  }
+  res.json({
+    email: admin.email,
+    role: admin.role || 'owner',
+    name: admin.name || '',
+    permissions: sanitizePermissions(admin.permissions),
+    effectivePermissions: [...getEffectivePermissions(admin)],
+  })
+}
+
+async function adminChangePassword(req, res) {
+  const body = req.body || {}
+  const currentPassword = body.currentPassword != null ? String(body.currentPassword) : ''
+  const newPassword = body.newPassword != null ? String(body.newPassword) : ''
+
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ message: 'currentPassword and newPassword are required' })
+  }
+  if (newPassword.length < MIN_PASSWORD_LEN) {
+    return res.status(400).json({ message: `New password must be at least ${MIN_PASSWORD_LEN} characters` })
+  }
+  if (currentPassword === newPassword) {
+    return res.status(400).json({ message: 'New password must be different from current password' })
+  }
+
+  const email = String(req.admin?.email || '')
+    .toLowerCase()
+    .trim()
+  if (!email) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+
+  const admin = await Admin.findOne({ email })
+  if (!admin) {
+    return res.status(404).json({ message: 'Admin account not found' })
+  }
+  if (!(await bcrypt.compare(currentPassword, admin.passwordHash))) {
+    return res.status(400).json({ message: 'Current password is incorrect' })
+  }
+
+  admin.passwordHash = await bcrypt.hash(newPassword, 10)
+  await admin.save()
+
+  await logAudit({
+    adminEmail: admin.email,
+    action: 'admin.password_change',
+    entityType: 'admin',
+    entityId: admin.email,
+  })
+
+  res.json({ message: 'Password updated successfully' })
 }
 
 // --- admin customers ---
 
 const { parsePagination, paginatedResponse } = require('./helpers/pagination')
-const { logAudit } = require('./helpers/auditLog')
 
 async function adminListUsers(req, res) {
   const { page, limit, skip, q } = parsePagination(req.query)
@@ -1988,6 +2056,8 @@ module.exports = {
   customerRequestCancel,
   customerRequestReturn,
   adminLogin,
+  adminGetMe,
+  adminChangePassword,
   adminListUsers,
   adminGetUser,
   adminPatchUser,

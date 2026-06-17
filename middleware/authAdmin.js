@@ -1,7 +1,7 @@
 const jwt = require('jsonwebtoken')
 const Admin = require('../Models/Admin')
-
-const ALLOWED_ROLES = new Set(['admin', 'superadmin', 'owner', 'catalog', 'fulfillment', 'support'])
+const { ALLOWED_ROLES } = require('./authAdminRoles')
+const { getEffectivePermissions, sanitizePermissions } = require('./adminPermissions')
 
 async function requireAdmin(req, res, next) {
   const secret = process.env.JWT_SECRET
@@ -21,8 +21,10 @@ async function requireAdmin(req, res, next) {
     if (!email) {
       return res.status(401).json({ message: 'Invalid or expired token' })
     }
-    const admin = await Admin.findOne({ email }).select('email role').lean()
-    if (!admin) {
+    const admin = await Admin.findOne({ email })
+      .select('email role permissions disabled name')
+      .lean()
+    if (!admin || admin.disabled) {
       return res.status(401).json({ message: 'Invalid or expired token' })
     }
     const dbRole = String(admin.role || 'owner').toLowerCase()
@@ -33,9 +35,13 @@ async function requireAdmin(req, res, next) {
     if (!ALLOWED_ROLES.has(jwtRole)) {
       return res.status(403).json({ message: 'Forbidden' })
     }
+    const effectivePermissions = [...getEffectivePermissions(admin)]
     req.admin = {
       email: admin.email,
       role: admin.role,
+      name: admin.name || '',
+      permissions: sanitizePermissions(admin.permissions),
+      effectivePermissions,
     }
     next()
   } catch {

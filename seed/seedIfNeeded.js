@@ -29,7 +29,7 @@ async function seedIfNeeded() {
 
   if ((await Admin.countDocuments()) === 0) {
     const passwordHash = await bcrypt.hash(effectivePassword, 10)
-    await Admin.create({ email, passwordHash })
+    await Admin.create({ email, passwordHash, role: 'owner' })
     if (!isProduction()) {
       console.log('Seeded admin user:', email)
     } else {
