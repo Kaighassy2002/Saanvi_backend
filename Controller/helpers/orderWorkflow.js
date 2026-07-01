@@ -43,7 +43,8 @@ const ORDER_TRANSITIONS = {
 
 const PAYMENT_TRANSITIONS = {
   pending: ['paid', 'failed'],
-  paid: ['refunded'],
+  paid: ['refunded', 'partially_refunded'],
+  partially_refunded: ['refunded', 'partially_refunded'],
   failed: [],
   refunded: [],
 }
@@ -214,7 +215,7 @@ function formatPaymentStatusLabel(status) {
   if (key === 'paid') return 'Paid'
   if (key === 'failed') return 'Failed'
   if (key === 'refunded') return 'Refunded'
-  if (key === 'partially_refunded') return 'Refunded'
+  if (key === 'partially_refunded') return 'Partially refunded'
   return 'Pending'
 }
 

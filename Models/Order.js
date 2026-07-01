@@ -58,6 +58,9 @@ const orderSchema = new mongoose.Schema({
         status: String,
         by: String,
         at: { type: Date, default: Date.now },
+        /** Line items covered by this refund */
+        lineItemIds: { type: [String], default: [] },
+        type: { type: String, default: '' },
       },
     ],
     default: [],

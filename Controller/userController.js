@@ -70,6 +70,16 @@ const {
 const { escapeRegex } = require('./helpers/safeRegex')
 const { quoteCheckout, incrementCouponUsage, rollbackCheckoutReservations } = require('./helpers/checkoutQuote')
 const {
+  normalizeOrderItems,
+  orderSummaryFromLines,
+  enrichItemsWithRefundDisplay,
+} = require('./helpers/orderLineItems')
+const {
+  cancelOrderLine,
+  requestReturnOrderLine,
+  adminCompleteLineReturn,
+} = require('./helpers/orderLineActions')
+const {
   generateCourierAwb,
   isShiprocketConfigured,
   isDelhiveryConfigured,
@@ -1276,6 +1286,14 @@ async function findCustomerOrderForRequest(req, orderId) {
   return doc
 }
 
+function orderToClientJson(doc, extra = {}) {
+  const json = doc.toJSON ? doc.toJSON() : { ...doc }
+  const normalized = normalizeOrderItems(json.items, json)
+  const items = enrichItemsWithRefundDisplay(normalized, json)
+  const lineSummary = orderSummaryFromLines(items, json.total, json.refunds)
+  return { ...json, items, lineSummary, ...extra }
+}
+
 async function customerListOrders(req, res) {
   const sub = String(req.customer.sub)
   const customer = await Customer.findById(sub).select('email')
@@ -1283,7 +1301,7 @@ async function customerListOrders(req, res) {
   const docs = await Order.find({
     $or: [{ customerUserId: sub }, { customerEmail: email }],
   }).sort({ placedAt: -1, date: -1 })
-  res.json({ orders: docs.map((d) => d.toJSON()) })
+  res.json({ orders: docs.map((d) => orderToClientJson(d)) })
 }
 
 async function customerGetOrder(req, res) {
@@ -1292,10 +1310,11 @@ async function customerGetOrder(req, res) {
     return res.status(404).json({ message: 'Order not found' })
   }
   const payments = await listPaymentsForOrderPublicId(doc.publicId)
-  res.json({
-    ...doc.toJSON(),
-    payments: payments.map((p) => p.toJSON()),
-  })
+  res.json(
+    orderToClientJson(doc, {
+      payments: payments.map((p) => p.toJSON()),
+    })
+  )
 }
 
 async function customerRequestCancel(req, res) {
@@ -1338,6 +1357,69 @@ async function customerRequestCancel(req, res) {
   doc.statusHistory = history
   await doc.save()
   res.json(doc.toJSON())
+}
+
+async function customerCancelLineItem(req, res) {
+  const doc = await findCustomerOrderForRequest(req, req.params.id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const lineId = String(req.params.lineId || '').trim()
+  const note = String(req.body?.note || 'Customer cancelled item').trim()
+  const by = doc.customerEmail || 'customer'
+  try {
+    const result = await cancelOrderLine(doc, lineId, { note, by })
+    if (result.refundAmount > 0) {
+      await sendOrderRefundEmail({
+        to: doc.customerEmail,
+        orderId: doc.publicId,
+        customerName: doc.customerName,
+        amount: result.refundAmount,
+        note: `Cancelled: ${result.lineName}`,
+      }).catch(() => {})
+    }
+    const payments = await listPaymentsForOrderPublicId(doc.publicId)
+    res.json(
+      orderToClientJson(result.order, {
+        payments: payments.map((p) => p.toJSON()),
+      })
+    )
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Could not cancel item' })
+  }
+}
+
+async function customerReturnLineItem(req, res) {
+  const doc = await findCustomerOrderForRequest(req, req.params.id)
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const lineId = String(req.params.lineId || '').trim()
+  const note = String(req.body?.note || 'Customer requested return').trim()
+  const by = doc.customerEmail || 'customer'
+  try {
+    const result = await requestReturnOrderLine(doc, lineId, { note, by })
+    await sendOrderStatusEmail({
+      to: doc.customerEmail,
+      orderId: doc.publicId,
+      customerName: doc.customerName,
+      status: 'Return Requested',
+    }).catch(() => {})
+    await sendAdminReturnRequestEmail({
+      orderId: doc.publicId,
+      customerName: doc.customerName,
+      returnReason: `${result.lineName}: ${note}`,
+      rmaId: result.rmaId,
+    }).catch(() => {})
+    const payments = await listPaymentsForOrderPublicId(doc.publicId)
+    res.json(
+      orderToClientJson(result.order, {
+        payments: payments.map((p) => p.toJSON()),
+      })
+    )
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Could not request return' })
+  }
 }
 
 async function customerRequestReturn(req, res) {
@@ -1511,10 +1593,99 @@ async function adminGetOrder(req, res) {
     return res.status(404).json({ message: 'Order not found' })
   }
   const payments = await listPaymentsForOrderPublicId(doc.publicId)
-  res.json({
-    ...doc.toJSON(),
-    payments: payments.map((p) => p.toJSON()),
-  })
+  res.json(
+    orderToClientJson(doc, {
+      payments: payments.map((p) => p.toJSON()),
+    })
+  )
+}
+
+async function adminCancelLineItem(req, res) {
+  const id = String(req.params.id || '').trim()
+  const lineId = String(req.params.lineId || '').trim()
+  const body = req.body || {}
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const note = String(req.body?.note || 'Cancelled by admin').trim()
+  const by = String(req.admin?.email || 'admin')
+  try {
+    const result = await cancelOrderLine(doc, lineId, {
+      note,
+      by,
+      skipGateway: body.skipGateway === true,
+    })
+    if (result.refundAmount > 0) {
+      await sendOrderRefundEmail({
+        to: doc.customerEmail,
+        orderId: doc.publicId,
+        customerName: doc.customerName,
+        amount: result.refundAmount,
+        note: `Cancelled: ${result.lineName}`,
+      }).catch(() => {})
+    }
+    await logAudit({
+      adminEmail: req.admin?.email,
+      action: 'order.line.cancel',
+      entityType: 'order',
+      entityId: id,
+      details: { lineId, refundAmount: result.refundAmount, lineName: result.lineName },
+    })
+    const payments = await listPaymentsForOrderPublicId(id)
+    res.json(
+      orderToClientJson(result.order, {
+        payments: payments.map((p) => p.toJSON()),
+      })
+    )
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Could not cancel line item' })
+  }
+}
+
+async function adminLineRmaAction(req, res) {
+  const id = String(req.params.id || '').trim()
+  const lineId = String(req.params.lineId || '').trim()
+  const body = req.body || {}
+  const step = String(body.step || '').toLowerCase()
+  const note = String(body.note || '').trim()
+  const doc = await Order.findOne({ publicId: id })
+  if (!doc) {
+    return res.status(404).json({ message: 'Order not found' })
+  }
+  const by = String(req.admin?.email || 'admin')
+  try {
+    const result = await adminCompleteLineReturn(doc, lineId, {
+      step,
+      note,
+      by,
+      skipGateway: body.skipGateway === true,
+    })
+    if (step === 'refund' && result.refundAmount > 0) {
+      await sendOrderRefundEmail({
+        to: doc.customerEmail,
+        orderId: doc.publicId,
+        customerName: doc.customerName,
+        amount: result.refundAmount,
+        note: note || 'Return refund processed',
+      }).catch(() => {})
+    }
+    await logAudit({
+      adminEmail: req.admin?.email,
+      action: `order.line.rma.${step}`,
+      entityType: 'order',
+      entityId: id,
+      details: { lineId, step, refundAmount: result.refundAmount },
+    })
+    const payments = await listPaymentsForOrderPublicId(id)
+    res.json(
+      orderToClientJson(result.order, {
+        payments: payments.map((p) => p.toJSON()),
+      })
+    )
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Line RMA action failed' })
+  }
 }
 
 async function adminPatchOrder(req, res) {
@@ -2055,6 +2226,8 @@ module.exports = {
   customerGetOrder,
   customerRequestCancel,
   customerRequestReturn,
+  customerCancelLineItem,
+  customerReturnLineItem,
   adminLogin,
   adminGetMe,
   adminChangePassword,
@@ -2071,6 +2244,8 @@ module.exports = {
   adminConfirmCod,
   adminProcessRefund,
   adminRmaAction,
+  adminCancelLineItem,
+  adminLineRmaAction,
   adminGenerateCourierAwb,
   adminGetCourierStatus,
 }

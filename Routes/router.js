@@ -124,6 +124,8 @@ router.get('/auth/orders', requireCustomer, asyncHandler(userController.customer
 router.get('/auth/orders/:id', requireCustomer, asyncHandler(userController.customerGetOrder))
 router.post('/auth/orders/:id/cancel-request', requireCustomer, asyncHandler(userController.customerRequestCancel))
 router.post('/auth/orders/:id/return-request', requireCustomer, asyncHandler(userController.customerRequestReturn))
+router.post('/auth/orders/:id/items/:lineId/cancel', requireCustomer, asyncHandler(userController.customerCancelLineItem))
+router.post('/auth/orders/:id/items/:lineId/return-request', requireCustomer, asyncHandler(userController.customerReturnLineItem))
 
 router.post('/orders/quote', orderLimiter, requireCustomer, asyncHandler(userController.customerQuoteCheckout))
 router.post('/orders', orderLimiter, requireCustomer, asyncHandler(userController.customerPlaceOrder))
@@ -211,6 +213,8 @@ admin.get('/orders/:id/invoice', perm.orders, asyncHandler(userController.adminG
 admin.post('/orders/:id/confirm-cod', perm.orders, asyncHandler(userController.adminConfirmCod))
 admin.post('/orders/:id/refund', perm.orders, asyncHandler(userController.adminProcessRefund))
 admin.post('/orders/:id/rma', perm.orders, asyncHandler(userController.adminRmaAction))
+admin.post('/orders/:id/items/:lineId/cancel', perm.orders, asyncHandler(userController.adminCancelLineItem))
+admin.post('/orders/:id/items/:lineId/rma', perm.orders, asyncHandler(userController.adminLineRmaAction))
 admin.post('/orders/:id/courier/awb', perm.orders, asyncHandler(userController.adminGenerateCourierAwb))
 admin.get('/orders/:id', perm.orders, asyncHandler(userController.adminGetOrder))
 admin.patch('/orders/:id', perm.orders, asyncHandler(userController.adminPatchOrder))

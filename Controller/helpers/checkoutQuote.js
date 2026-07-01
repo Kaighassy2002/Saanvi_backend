@@ -3,6 +3,7 @@ const { isValidObjectId } = require('./mongoIds')
 const { resolveAndMaybeDecrementLine, releaseReservation } = require('./orderLineStock')
 const { getShippingSettings, computeShippingFee } = require('./siteSettings')
 const { computeDiscount, incrementCouponUsage, resolveCoupon, round2 } = require('./couponCheckout')
+const { enrichVerifiedItems } = require('./orderLineItems')
 
 async function rollbackCheckoutReservations(reservations, session = null) {
   for (const undo of reservations || []) {
@@ -102,9 +103,10 @@ async function quoteCheckout(rawItems, { couponCode = '', session = null, decrem
 
   const shippingFee = await getShippingFee(subtotal)
   const total = round2(Math.max(0, subtotal - couponDiscount) + shippingFee)
+  const lineItems = enrichVerifiedItems(verifiedItems, subtotal, couponDiscount)
 
   return {
-    verifiedItems,
+    verifiedItems: lineItems,
     subtotal,
     couponCode: appliedCode,
     couponDiscount,
