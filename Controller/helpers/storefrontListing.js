@@ -404,7 +404,7 @@ function interleaveListingEntries(entries) {
 }
 
 function buildCollectionListing(products, sortBy, { featuredProductIds = [] } = {}) {
-  const postExpandSorts = new Set(['featured', 'latest'])
+  const postExpandSorts = new Set(['price-low', 'price-high', 'discount'])
   const postExpandMixSorts = new Set(['featured', 'latest'])
 
   if (postExpandSorts.has(sortBy)) {
