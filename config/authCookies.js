@@ -6,7 +6,8 @@ const ADMIN_COOKIE = 'jewellery_admin_token'
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: isProduction(),
-  sameSite: 'lax',
+  // Cross-origin storefront (Vercel) + API (Render) requires SameSite=None.
+  sameSite: isProduction() ? 'none' : 'lax',
   path: '/',
   maxAge: 7 * 24 * 60 * 60 * 1000,
 }
