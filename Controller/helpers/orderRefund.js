@@ -65,9 +65,51 @@ async function applyRefundToPayment(orderPublicId, paymentStatus) {
   return latest
 }
 
+/**
+ * Refund a captured Razorpay payment when no order could be created (orphan payment safety net).
+ */
+async function refundCapturedRazorpayPayment({
+  razorpayPaymentId,
+  amountInr,
+  reason = 'order_creation_failed',
+  note = '',
+  by = 'system',
+}) {
+  const rp = razorpayClient()
+  if (!rp || !isRazorpayConfigured()) {
+    throw new Error('Razorpay is not configured — manual refund required')
+  }
+  const paymentId = String(razorpayPaymentId || '').trim()
+  if (!paymentId) {
+    throw new Error('razorpayPaymentId required for refund')
+  }
+  const amountPaise = Math.round(Number(amountInr) * 100)
+  if (!Number.isFinite(amountPaise) || amountPaise <= 0) {
+    throw new Error('Refund amount must be greater than zero')
+  }
+
+  const refund = await rp.payments.refund(paymentId, {
+    amount: amountPaise,
+    notes: { reason: String(reason || note || 'Auto refund').slice(0, 255) },
+  })
+
+  return {
+    amount: round2(amountInr),
+    currency: 'INR',
+    reason: String(reason || '').trim(),
+    note: String(note || '').trim(),
+    razorpayRefundId: String(refund.id || ''),
+    status: String(refund.status || 'processed'),
+    provider: 'razorpay',
+    by: String(by || 'system'),
+    at: new Date(),
+  }
+}
+
 module.exports = {
   processRazorpayRefund,
   resolveRefundPaymentStatus,
   applyRefundToPayment,
+  refundCapturedRazorpayPayment,
   round2,
 }

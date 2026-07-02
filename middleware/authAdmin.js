@@ -2,17 +2,17 @@ const jwt = require('jsonwebtoken')
 const Admin = require('../Models/Admin')
 const { ALLOWED_ROLES } = require('./authAdminRoles')
 const { getEffectivePermissions, sanitizePermissions } = require('./adminPermissions')
+const { getBearerToken } = require('../config/authCookies')
 
 async function requireAdmin(req, res, next) {
   const secret = process.env.JWT_SECRET
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
-  const h = req.headers.authorization
-  if (!h || !h.startsWith('Bearer ')) {
+  const token = getBearerToken(req, 'admin')
+  if (!token) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
-  const token = h.slice(7).trim()
   try {
     const payload = jwt.verify(token, secret)
     const email = String(payload.email || '')

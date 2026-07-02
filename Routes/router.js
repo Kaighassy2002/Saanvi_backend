@@ -36,10 +36,7 @@ const router = express.Router()
 
 router.get('/health', (_req, res) => {
   const dbOk = mongoose.connection.readyState === 1
-  res.status(dbOk ? 200 : 503).json({
-    ok: dbOk,
-    db: dbOk ? 'connected' : 'disconnected',
-  })
+  res.status(dbOk ? 200 : 503).json({ ok: dbOk })
 })
 
 router.get('/sitemap.xml', cachePublic(3600), publicApiLimiter, asyncHandler(seoController.getSitemapXml))
@@ -110,6 +107,7 @@ router.get('/payments/razorpay-config', publicApiLimiter, asyncHandler(paymentsC
 
 router.post('/auth/register', authLimiter, asyncHandler(userController.customerRegister))
 router.post('/auth/login', authLimiter, asyncHandler(userController.customerLogin))
+router.post('/auth/logout', asyncHandler(userController.customerLogout))
 router.post('/auth/google', authLimiter, asyncHandler(userController.customerGoogleLogin))
 router.post('/auth/forgot-password/request', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordRequest))
 router.post('/auth/forgot-password/verify', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordVerifyOtp))
@@ -152,6 +150,7 @@ const perm = {
 }
 
 admin.get('/auth/me', asyncHandler(userController.adminGetMe))
+admin.post('/auth/logout', asyncHandler(userController.adminLogout))
 admin.patch('/auth/password', asyncHandler(userController.adminChangePassword))
 
 admin.get('/staff/permissions-meta', perm.staff, asyncHandler(adminStaffController.adminGetPermissionsMeta))

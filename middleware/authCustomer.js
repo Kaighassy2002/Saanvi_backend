@@ -1,16 +1,16 @@
 const jwt = require('jsonwebtoken')
 const Customer = require('../Models/Customer')
+const { getBearerToken } = require('../config/authCookies')
 
 async function requireCustomer(req, res, next) {
   const secret = process.env.JWT_SECRET
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
-  const h = req.headers.authorization
-  if (!h || !h.startsWith('Bearer ')) {
+  const token = getBearerToken(req, 'customer')
+  if (!token) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
-  const token = h.slice(7).trim()
   try {
     const payload = jwt.verify(token, secret)
     const role = String(payload.role || '').toLowerCase()

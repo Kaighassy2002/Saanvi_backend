@@ -22,6 +22,16 @@ async function start() {
     publishDueProducts().catch((err) => console.error('Scheduled publish check failed:', err))
   }, 60 * 1000)
 
+  const { cleanupExpiredCheckoutIntents } = require('./Controller/helpers/checkoutIntent')
+  cleanupExpiredCheckoutIntents().catch((err) =>
+    console.error('Checkout intent cleanup failed:', err?.message || err)
+  )
+  setInterval(() => {
+    cleanupExpiredCheckoutIntents().catch((err) =>
+      console.error('Checkout intent cleanup failed:', err?.message || err)
+    )
+  }, 5 * 60 * 1000)
+
   server = app.listen(PORT, () => {
     console.log(`Jewellery server started on port ${PORT}`)
   })

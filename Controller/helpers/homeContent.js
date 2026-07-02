@@ -61,6 +61,8 @@ const DEFAULT_HOME_SERVICES = [
   { icon: 'fa-headset', title: 'Support', text: 'WhatsApp help' },
 ]
 
+const { safeInternalPath } = require('./safePath')
+
 function hasContent(item, fields) {
   if (!item || typeof item !== 'object') return false
   return fields.some((f) => String(item[f] || '').trim())
@@ -73,10 +75,23 @@ function sanitizePromoBanners(input) {
       label: String(b?.label || '').trim(),
       title: String(b?.title || '').trim(),
       image: String(b?.image || '').trim(),
-      link: String(b?.link || '').trim() || '/collections',
+      link: safeInternalPath(b?.link, '/collections'),
       buttonText: String(b?.buttonText || '').trim() || 'Shop now',
     }))
     .filter((b) => hasContent(b, ['image', 'title']))
+}
+
+function sanitizeHeroSlides(input) {
+  if (!Array.isArray(input)) return []
+  return input
+    .map((s) => ({
+      image: String(s?.image || '').trim(),
+      tag: String(s?.tag || '').trim(),
+      title: String(s?.title || '').trim(),
+      subtitle: String(s?.subtitle || '').trim(),
+      link: safeInternalPath(s?.link, '/collections'),
+    }))
+    .filter((s) => s.image || s.title)
 }
 
 function sanitizeHomeServices(input) {
@@ -110,7 +125,7 @@ function sanitizeHomeSections(input) {
     ? src.mobileQuickShop.chips
         .map((c) => ({
           label: String(c?.label || '').trim(),
-          link: String(c?.link || '').trim() || '/collections',
+          link: safeInternalPath(c?.link, '/collections'),
           highlight: !!c?.highlight,
         }))
         .filter((c) => c.label)
@@ -160,6 +175,7 @@ module.exports = {
   DEFAULT_PROMO_BANNERS,
   DEFAULT_HOME_SERVICES,
   sanitizePromoBanners,
+  sanitizeHeroSlides,
   sanitizeHomeServices,
   sanitizeHomeSections,
   resolvePromoBanners,

@@ -5,6 +5,8 @@ const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
 const compression = require('compression')
+const cookieParser = require('cookie-parser')
+const mongoSanitize = require('express-mongo-sanitize')
 const apiRouter = require('./Routes/router')
 const { isProduction } = require('./config/isProduction')
 const { clientErrorMessage } = require('./Controller/helpers/httpError')
@@ -22,14 +24,25 @@ function allowedOriginsFromEnv() {
 function createApp() {
   const app = express()
   app.set('trust proxy', 1)
-  app.use(helmet())
+  // API serves JSON only — disable CSP here; set CSP on the static frontend host.
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    })
+  )
   app.use(compression())
+  app.use(cookieParser())
 
   const allowedOrigins = allowedOriginsFromEnv()
   app.use(
     cors({
+      credentials: true,
       origin(origin, cb) {
-        if (!origin) return cb(null, true)
+        // Block missing Origin in production (non-browser clients should use server-to-server).
+        if (!origin) {
+          return isProduction() ? cb(new Error('CORS blocked for origin')) : cb(null, true)
+        }
         if (allowedOrigins.length === 0) {
           if (origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173') {
             return cb(null, true)
@@ -42,6 +55,18 @@ function createApp() {
     })
   )
   app.use(express.json({ limit: '1mb' }))
+  // Express 5 makes req.query read-only; express-mongo-sanitize must replace it with a mutable copy.
+  app.use((req, _res, next) => {
+    Object.defineProperty(req, 'query', {
+      value: { ...req.query },
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    })
+    next()
+  })
+  // Strip MongoDB operator keys from user input (NoSQL injection defense-in-depth).
+  app.use(mongoSanitize({ replaceWith: '_' }))
   app.use('/api', apiRouter)
 
   app.get('/', (_req, res) => {

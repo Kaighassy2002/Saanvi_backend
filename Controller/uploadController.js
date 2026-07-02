@@ -20,6 +20,9 @@ async function adminGetCloudinarySignature(req, res) {
     timestamp,
     folder,
     transformation,
+    // Restrict uploads to image types and size (Cloudinary enforces on upload).
+    allowed_formats: 'jpg,jpeg,png,webp',
+    max_file_size: 5_000_000,
   }
   const signature = cloudinary.utils.api_sign_request(
     paramsToSign,

@@ -8,9 +8,11 @@ const {
 } = require('./helpers/orderCourier')
 const {
   sanitizePromoBanners,
+  sanitizeHeroSlides,
   sanitizeHomeServices,
   sanitizeHomeSections,
 } = require('./helpers/homeContent')
+const { safeInternalPath } = require('./helpers/safePath')
 
 function announcementFieldsFromDoc(settings) {
   const doc = settings?.toObject ? settings.toObject() : settings || {}
@@ -157,11 +159,11 @@ async function adminUpdateSettings(req, res) {
   if (body.announcementEnabled !== undefined) settings.announcementEnabled = !!body.announcementEnabled
   if (body.announcementShowIcon !== undefined) settings.announcementShowIcon = !!body.announcementShowIcon
   if (body.announcementLinkUrl !== undefined) {
-    settings.announcementLinkUrl = String(body.announcementLinkUrl || '').trim() || '/collections'
+    settings.announcementLinkUrl = safeInternalPath(body.announcementLinkUrl, '/collections')
   }
   if (body.newArrivalProductIds !== undefined) settings.newArrivalProductIds = body.newArrivalProductIds.map(String)
   if (body.featuredProductIds !== undefined) settings.featuredProductIds = body.featuredProductIds.map(String)
-  if (body.heroSlides !== undefined) settings.heroSlides = body.heroSlides
+  if (body.heroSlides !== undefined) settings.heroSlides = sanitizeHeroSlides(body.heroSlides)
   if (body.homeCategoryImages !== undefined) settings.homeCategoryImages = body.homeCategoryImages
   if (body.promoBanners !== undefined) settings.promoBanners = sanitizePromoBanners(body.promoBanners)
   if (body.homeServices !== undefined) settings.homeServices = sanitizeHomeServices(body.homeServices)

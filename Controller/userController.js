@@ -18,7 +18,12 @@ const {
 } = require('./helpers/otpEmail')
 const { codPaymentBlockedMessage } = require('./helpers/checkoutPolicy')
 const { logAudit } = require('./helpers/auditLog')
-const { getEffectivePermissions, sanitizePermissions } = require('../middleware/adminPermissions')
+const {
+  getEffectivePermissions,
+  sanitizePermissions,
+  isStaffManagerRole,
+  normalizeRole,
+} = require('../middleware/adminPermissions')
 const { isValidObjectId } = require('./helpers/mongoIds')
 const { isProduction } = require('../config/isProduction')
 const { getShippingSettings, computeShippingFee } = require('./helpers/siteSettings')
@@ -65,6 +70,7 @@ const {
   processRazorpayRefund,
   resolveRefundPaymentStatus,
   applyRefundToPayment,
+  refundCapturedRazorpayPayment,
   round2,
 } = require('./helpers/orderRefund')
 const { escapeRegex } = require('./helpers/safeRegex')
@@ -83,6 +89,20 @@ const {
   getCourierHealth,
 } = require('./helpers/orderCourier')
 const { deliveryService } = require('../delivery')
+const {
+  setCustomerAuthCookie,
+  setAdminAuthCookie,
+  clearCustomerAuthCookie,
+  clearAdminAuthCookie,
+} = require('../config/authCookies')
+const { captureServerError } = require('../config/sentry')
+const {
+  createPendingCheckoutIntent,
+  attachRazorpayOrderToIntent,
+  findActiveCheckoutIntent,
+  consumeCheckoutIntent,
+  failCheckoutIntent,
+} = require('./helpers/checkoutIntent')
 
 const MIN_PASSWORD_LEN = 8
 const OTP_LENGTH = 6
@@ -249,7 +269,8 @@ async function customerRegister(req, res) {
       disabled: false,
     })
     const token = signCustomerToken(customer, secret)
-    res.status(201).json({ token, user: customerPublicJson(customer) })
+    setCustomerAuthCookie(res, token)
+    res.status(201).json({ user: customerPublicJson(customer) })
   } catch (err) {
     if (err.code === 11000) {
       return res.status(409).json({ message: 'An account with this email already exists' })
@@ -284,7 +305,13 @@ async function customerLogin(req, res) {
     return res.status(401).json({ message: 'Invalid email or password' })
   }
   const token = signCustomerToken(customer, secret)
-  res.json({ token, user: customerPublicJson(customer) })
+  setCustomerAuthCookie(res, token)
+  res.json({ user: customerPublicJson(customer) })
+}
+
+async function customerLogout(_req, res) {
+  clearCustomerAuthCookie(res)
+  res.status(204).end()
 }
 
 async function customerGoogleLogin(req, res) {
@@ -329,13 +356,22 @@ async function customerGoogleLogin(req, res) {
 
   let customer = await Customer.findOne({ googleId })
   if (!customer) {
-    customer = await Customer.findOne({ email })
+    customer = await Customer.findOne({ email }).select('+passwordHash')
     if (customer) {
       if (customer.disabled) {
         return res.status(403).json({ message: 'Account is disabled' })
       }
       if (customer.googleId && customer.googleId !== googleId) {
         return res.status(409).json({ message: 'This email is linked to another Google account' })
+      }
+      // Security: do not auto-link Google to an existing password account without proof of ownership.
+      if (customer.passwordHash && !customer.googleId) {
+        return res.status(409).json({
+          message:
+            'An account with this email already exists. Sign in with your password first, then link Google from your profile.',
+          code: 'LINK_ACCOUNT_REQUIRED',
+          email,
+        })
       }
       if (!customer.googleId) {
         customer.googleId = googleId
@@ -390,7 +426,8 @@ async function customerGoogleLogin(req, res) {
   }
 
   const token = signCustomerToken(customer, secret)
-  res.json({ token, user: customerPublicJson(customer) })
+  setCustomerAuthCookie(res, token)
+  res.json({ user: customerPublicJson(customer) })
 }
 
 async function customerForgotPasswordRequest(req, res) {
@@ -623,8 +660,8 @@ async function adminLogin(req, res) {
   const role = admin.role || 'owner'
   const effectivePermissions = [...getEffectivePermissions(admin)]
   const token = jwt.sign({ role, email: admin.email }, secret, { expiresIn: '7d' })
+  setAdminAuthCookie(res, token)
   res.json({
-    token,
     user: {
       email: admin.email,
       role,
@@ -633,6 +670,11 @@ async function adminLogin(req, res) {
       effectivePermissions,
     },
   })
+}
+
+async function adminLogout(_req, res) {
+  clearAdminAuthCookie(res)
+  res.status(204).end()
 }
 
 async function adminGetMe(req, res) {
@@ -1025,6 +1067,114 @@ async function createPaidStorefrontOrder({
   return doc
 }
 
+/**
+ * Place order using a pre-reserved checkout intent (Razorpay flow).
+ * Skips re-quoting so stock is not double-reserved.
+ */
+async function createPaidStorefrontOrderFromIntent({
+  intent,
+  body,
+  shipping,
+  customerUserId,
+  paymentStatus,
+  razorpayOrderId = '',
+  razorpayPaymentId = '',
+  instrument = '',
+}) {
+  if (!verifyClientTotal(body.total, intent.total)) {
+    throw new Error('Order total mismatch. Please refresh cart and try again.')
+  }
+  const customerName = `${shipping.firstName} ${shipping.lastName}`.trim()
+  const publicId = await generateOrderPublicId(Order)
+  const placedAt = new Date()
+  const date = placedAt.toISOString().slice(0, 10)
+  const paymentMethod = normalizePaymentMethod(body.paymentMethod)
+  const { status: initialStatus, paymentStatus: orderPaymentStatus } = getInitialOrderState(
+    paymentMethod,
+    paymentStatus
+  )
+  const couponId = intent.couponId || null
+
+  const orderPayload = {
+    publicId,
+    date,
+    placedAt,
+    status: initialStatus,
+    subtotal: intent.subtotal,
+    shippingFee: intent.shippingFee,
+    couponCode: intent.couponCode || '',
+    couponDiscount: intent.couponDiscount,
+    total: intent.total,
+    customerEmail: shipping.email,
+    customerName,
+    shipping,
+    paymentMethod,
+    paymentStatus: orderPaymentStatus,
+    trackingNumber: '',
+    internalNotes: '',
+    placedVia: 'storefront',
+    customerUserId,
+    items: intent.verifiedItems,
+    statusHistory: buildPlacementHistory({
+      paymentStatus: orderPaymentStatus,
+      paymentMethod,
+      by: 'system',
+    }),
+  }
+
+  const session = await mongoose.startSession()
+  let doc
+  try {
+    session.startTransaction()
+    ;[doc] = await Order.create([orderPayload], { session })
+    if (couponId) {
+      await incrementCouponUsage(couponId, session)
+    }
+    await createPaymentForOrder({
+      orderDoc: doc,
+      paymentMethod,
+      paymentStatus: orderPaymentStatus,
+      razorpayOrderId,
+      razorpayPaymentId,
+      instrument,
+      session,
+    })
+    await session.commitTransaction()
+    await consumeCheckoutIntent(intent)
+  } catch (err) {
+    await session.abortTransaction()
+    const msg = String(err?.message || '')
+    const transactionUnavailable =
+      msg.includes('Transaction numbers are only allowed on a replica set member') ||
+      msg.includes('Transaction support is disabled')
+    if (transactionUnavailable) {
+      if (isProduction()) {
+        throw new Error(
+          'Order placement is temporarily unavailable. Database must support transactions in production.'
+        )
+      }
+      doc = await Order.create(orderPayload)
+      if (couponId) {
+        await incrementCouponUsage(couponId)
+      }
+      await createPaymentForOrder({
+        orderDoc: doc,
+        paymentMethod,
+        paymentStatus: orderPaymentStatus,
+        razorpayOrderId,
+        razorpayPaymentId,
+        instrument,
+      })
+      await consumeCheckoutIntent(intent)
+    } else {
+      throw err
+    }
+  } finally {
+    await session.endSession()
+  }
+  return doc
+}
+
 async function customerQuoteCheckout(req, res) {
   const body = req.body || {}
   const items = Array.isArray(body.items) ? body.items : []
@@ -1119,43 +1269,67 @@ async function createRazorpayOrder(req, res) {
   if (items.length === 0) {
     return res.status(400).json({ message: 'Cart items required' })
   }
+  for (const line of items) {
+    if (line == null || line.quantity == null || Number(line.quantity) < 1) {
+      return res.status(400).json({ message: 'Invalid line item quantity' })
+    }
+    if (!isValidObjectId(line.productId)) {
+      return res.status(400).json({ message: 'Invalid product in cart' })
+    }
+  }
   if (!isRazorpayConfigured()) {
     return res.status(503).json({ message: 'Online payment is not configured. Use Cash on Delivery or contact support.' })
   }
   const rp = razorpayClient()
   const couponCode = String(body.couponCode || '').trim()
-  const { subtotal, shippingFee, total } = await quoteVerifiedItems(items, couponCode)
-  if (!verifyClientTotal(body.total, total)) {
-    return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
-  }
-  if (total < 1) {
-    return res.status(400).json({ message: 'Order total must be at least ₹1 for online payment.' })
-  }
-  const amountPaise = Math.round(total * 100)
+  const customerUserId = String(req.customer.sub)
+
+  let intent
   try {
-    const created = await rp.orders.create({
+    const created = await createPendingCheckoutIntent({ customerUserId, items, couponCode })
+    intent = created.intent
+    const { subtotal, shippingFee, total } = created.quote
+    if (!verifyClientTotal(body.total, total)) {
+      await failCheckoutIntent(intent)
+      return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
+    }
+    if (total < 1) {
+      await failCheckoutIntent(intent)
+      return res.status(400).json({ message: 'Order total must be at least ₹1 for online payment.' })
+    }
+    const amountPaise = Math.round(total * 100)
+    const razorpayOrder = await rp.orders.create({
       amount: amountPaise,
       currency: RAZORPAY_CURRENCY,
       receipt: `rcpt_${Date.now()}`,
       notes: {
-        customerUserId: String(req.customer.sub),
+        customerUserId,
+        checkoutIntentId: String(intent._id),
         subtotal: String(subtotal),
         shippingFee: String(shippingFee),
       },
     })
+    await attachRazorpayOrderToIntent(intent._id, razorpayOrder.id)
     res.json({
-      razorpayOrderId: created.id,
-      amount: created.amount,
-      currency: created.currency,
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
       keyId: getPublicKeyId(),
       subtotal,
       shippingFee,
       total,
     })
   } catch (err) {
+    if (intent) {
+      await failCheckoutIntent(intent).catch(() => {})
+    }
     console.error('Razorpay order create failed:', err?.message || err)
-    res.status(502).json({
-      message: err?.error?.description || err?.message || 'Could not start payment. Check Razorpay keys.',
+    const clientMsg =
+      err?.message && !String(err.message).includes('Razorpay')
+        ? err.message
+        : err?.error?.description || err?.message || 'Could not start payment. Check Razorpay keys.'
+    res.status(err?.message?.includes('stock') || err?.message?.includes('unavailable') ? 400 : 502).json({
+      message: clientMsg,
     })
   }
 }
@@ -1201,36 +1375,66 @@ async function verifyRazorpayPayment(req, res) {
       if (String(existingOrder.customerUserId) !== customerUserId) {
         return res.status(409).json({ message: 'This payment has already been processed' })
       }
-      return res.status(200).json(existingOrder.toJSON())
+      return res.status(200).json(orderToStorefrontJson(existingOrder))
     }
   }
 
   const rp = razorpayClient()
+  let checkoutIntent = null
+  let paymentCapturedInr = null
   try {
+    checkoutIntent = await findActiveCheckoutIntent({ razorpayOrderId, customerUserId })
     const couponCode = String(body.couponCode || '').trim()
-    const { total } = await quoteVerifiedItems(body.items || [], couponCode)
-    if (!verifyClientTotal(body.total, total)) {
+
+    let expectedTotal
+    if (checkoutIntent) {
+      expectedTotal = checkoutIntent.total
+    } else {
+      // Backward compatible fallback for in-flight checkouts started before intent rollout.
+      const quote = await quoteVerifiedItems(body.items || [], couponCode)
+      expectedTotal = quote.total
+    }
+
+    if (!verifyClientTotal(body.total, expectedTotal)) {
       return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
     }
+
     const rpPayment = await assertRazorpayPaymentCaptured(rp, {
       razorpayOrderId,
       razorpayPaymentId,
-      expectedTotalInr: total,
+      expectedTotalInr: expectedTotal,
     })
-    const doc = await createPaidStorefrontOrder({
-      body: {
-        items: body.items,
-        total: body.total,
-        paymentMethod: body.paymentMethod || 'razorpay',
-        couponCode,
-      },
-      shipping: { firstName, lastName, email, phone, address, city, state, pincode },
-      customerUserId,
-      paymentStatus: 'paid',
-      razorpayOrderId,
-      razorpayPaymentId,
-      instrument: String(rpPayment?.method || ''),
-    })
+    paymentCapturedInr = expectedTotal
+
+    const orderBody = {
+      items: body.items,
+      total: body.total,
+      paymentMethod: body.paymentMethod || 'razorpay',
+      couponCode,
+    }
+    const shippingPayload = { firstName, lastName, email, phone, address, city, state, pincode }
+
+    const doc = checkoutIntent
+      ? await createPaidStorefrontOrderFromIntent({
+          intent: checkoutIntent,
+          body: orderBody,
+          shipping: shippingPayload,
+          customerUserId,
+          paymentStatus: 'paid',
+          razorpayOrderId,
+          razorpayPaymentId,
+          instrument: String(rpPayment?.method || ''),
+        })
+      : await createPaidStorefrontOrder({
+          body: orderBody,
+          shipping: shippingPayload,
+          customerUserId,
+          paymentStatus: 'paid',
+          razorpayOrderId,
+          razorpayPaymentId,
+          instrument: String(rpPayment?.method || ''),
+        })
+
     sendOrderConfirmationEmail({
       to: email,
       orderId: doc.publicId,
@@ -1251,7 +1455,7 @@ async function verifyRazorpayPayment(req, res) {
     }).catch((err) => {
       console.error('Admin new-order email failed:', err.message)
     })
-    res.status(201).json(doc.toJSON())
+    res.status(201).json(orderToStorefrontJson(doc))
   } catch (err) {
     if (err?.code === 11000 && String(err?.message || '').includes('razorpayPaymentId')) {
       const replayPayment = await findPaymentByRazorpayId(razorpayPaymentId)
@@ -1259,21 +1463,45 @@ async function verifyRazorpayPayment(req, res) {
         ? await Order.findOne({ publicId: replayPayment.orderPublicId })
         : null
       if (replayOrder && String(replayOrder.customerUserId) === customerUserId) {
-        return res.status(200).json(replayOrder.toJSON())
+        return res.status(200).json(orderToStorefrontJson(replayOrder))
       }
       return res.status(409).json({ message: 'This payment has already been processed' })
     }
-    const msg = err?.message || 'Could not finalize payment order'
-    const status = msg.includes('verification') || msg.includes('mismatch') ? 400 : 502
+
+    let refunded = false
+    if (paymentCapturedInr != null && razorpayPaymentId) {
+      try {
+        await refundCapturedRazorpayPayment({
+          razorpayPaymentId,
+          amountInr: paymentCapturedInr,
+          reason: 'order_creation_failed',
+          note: String(err?.message || '').slice(0, 240),
+        })
+        refunded = true
+      } catch (refundErr) {
+        captureServerError(refundErr, {
+          tags: { source: 'razorpay-auto-refund' },
+          extra: { razorpayPaymentId, razorpayOrderId },
+        })
+        console.error('Auto-refund after failed order placement:', refundErr?.message || refundErr)
+      }
+    }
+
+    if (checkoutIntent) {
+      await failCheckoutIntent(checkoutIntent).catch(() => {})
+    }
+
+    const msg = refunded
+      ? 'Payment received but the order could not be placed. A refund has been initiated — please try again.'
+      : err?.message || 'Could not finalize payment order'
+    const status = refunded ? 409 : msg.includes('verification') || msg.includes('mismatch') ? 400 : 502
     res.status(status).json({ message: msg })
   }
 }
 
 async function findCustomerOrderForRequest(req, orderId) {
   const sub = String(req.customer.sub)
-  const customer = await Customer.findById(sub).select('email')
-  const email = (customer?.email || req.customer.email || '').toLowerCase().trim()
-  const ownerFilter = { $or: [{ customerUserId: sub }, { customerEmail: email }] }
+  const ownerFilter = { customerUserId: sub }
   const key = String(orderId || '').trim()
   if (!key) return null
 
@@ -1292,14 +1520,22 @@ function orderToClientJson(doc, extra = {}) {
   return { ...json, items, lineSummary, ...extra }
 }
 
+/** Strip admin-only order fields before sending to storefront customers. */
+function orderToStorefrontJson(doc, extra = {}) {
+  const json = orderToClientJson(doc, extra)
+  const {
+    internalNotes: _internalNotes,
+    codConfirmedBy: _codConfirmedBy,
+    statusHistory: _statusHistory,
+    ...safe
+  } = json
+  return safe
+}
+
 async function customerListOrders(req, res) {
   const sub = String(req.customer.sub)
-  const customer = await Customer.findById(sub).select('email')
-  const email = (customer?.email || req.customer.email || '').toLowerCase().trim()
-  const docs = await Order.find({
-    $or: [{ customerUserId: sub }, { customerEmail: email }],
-  }).sort({ placedAt: -1, date: -1 })
-  res.json({ orders: docs.map((d) => orderToClientJson(d)) })
+  const docs = await Order.find({ customerUserId: sub }).sort({ placedAt: -1, date: -1 })
+  res.json({ orders: docs.map((d) => orderToStorefrontJson(d)) })
 }
 
 async function customerGetOrder(req, res) {
@@ -1309,7 +1545,7 @@ async function customerGetOrder(req, res) {
   }
   const payments = await listPaymentsForOrderPublicId(doc.publicId)
   res.json(
-    orderToClientJson(doc, {
+    orderToStorefrontJson(doc, {
       payments: payments.map((p) => p.toJSON()),
     })
   )
@@ -1341,7 +1577,7 @@ async function customerRequestCancel(req, res) {
     doc.statusHistory = history
     await doc.save()
     await restockOrderItems(Product, doc.items, null, doc.publicId, doc.stockCommitted)
-    return res.json(doc.toJSON())
+    return res.json(orderToStorefrontJson(doc))
   }
 
   const history = appendHistoryEntry(doc.statusHistory, {
@@ -1354,7 +1590,7 @@ async function customerRequestCancel(req, res) {
   doc.cancelReason = note
   doc.statusHistory = history
   await doc.save()
-  res.json(doc.toJSON())
+  res.json(orderToStorefrontJson(doc))
 }
 
 async function customerCancelLineItem(req, res) {
@@ -1378,7 +1614,7 @@ async function customerCancelLineItem(req, res) {
     }
     const payments = await listPaymentsForOrderPublicId(doc.publicId)
     res.json(
-      orderToClientJson(result.order, {
+      orderToStorefrontJson(result.order, {
         payments: payments.map((p) => p.toJSON()),
       })
     )
@@ -1411,7 +1647,7 @@ async function customerReturnLineItem(req, res) {
     }).catch(() => {})
     const payments = await listPaymentsForOrderPublicId(doc.publicId)
     res.json(
-      orderToClientJson(result.order, {
+      orderToStorefrontJson(result.order, {
         payments: payments.map((p) => p.toJSON()),
       })
     )
@@ -1460,7 +1696,7 @@ async function customerRequestReturn(req, res) {
     rmaId: doc.rmaId,
   }).catch(() => {})
 
-  res.json(doc.toJSON())
+  res.json(orderToStorefrontJson(doc))
 }
 
 // --- admin orders ---
@@ -1689,29 +1925,31 @@ async function adminLineRmaAction(req, res) {
 async function adminPatchOrder(req, res) {
   const { id } = req.params
   const body = req.body || {}
+  // Financial line items are immutable after placement — use refunds for adjustments.
   const allowed = [
     'status',
-    'paymentStatus',
     'trackingNumber',
     'courierPartner',
     'estimatedDeliveryAt',
     'cancelReason',
     'returnReason',
     'internalNotes',
-    'customerEmail',
-    'customerName',
-    'subtotal',
-    'shippingFee',
-    'total',
-    'shipping',
-    'paymentMethod',
-    'items',
-    'date',
   ]
   const updates = {}
   for (const key of allowed) {
     if (body[key] !== undefined) updates[key] = body[key]
   }
+
+  if (body.paymentStatus !== undefined) {
+    const role = normalizeRole(req.admin?.role)
+    if (!isStaffManagerRole(role)) {
+      return res.status(403).json({
+        message: 'Only owners and administrators can change payment status directly. Use the refund flow.',
+      })
+    }
+    updates.paymentStatus = body.paymentStatus
+  }
+
   const existing = await Order.findOne({ publicId: id })
   if (!existing) {
     return res.status(404).json({ message: 'Order not found' })
@@ -2193,6 +2431,7 @@ async function adminGetCourierStatus(_req, res) {
 module.exports = {
   customerRegister,
   customerLogin,
+  customerLogout,
   customerGoogleLogin,
   customerForgotPasswordRequest,
   customerForgotPasswordVerifyOtp,
@@ -2214,6 +2453,7 @@ module.exports = {
   customerCancelLineItem,
   customerReturnLineItem,
   adminLogin,
+  adminLogout,
   adminGetMe,
   adminChangePassword,
   adminListUsers,

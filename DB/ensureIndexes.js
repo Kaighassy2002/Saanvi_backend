@@ -3,6 +3,7 @@ const Order = require('../Models/Order')
 const Payment = require('../Models/Payment')
 const Customer = require('../Models/Customer')
 const Review = require('../Models/Review')
+const CheckoutIntent = require('../Models/CheckoutIntent')
 
 /** Avoid crashing startup when an index already exists with same keys (e.g. unique from schema vs plain createIndex). */
 async function safeCreateIndex(collection, spec, options = {}) {
@@ -48,6 +49,8 @@ async function ensureIndexes() {
     safeCreateIndex(Payment.collection, { createdAt: -1 }),
     safeCreateIndex(Customer.collection, { email: 1 }),
     safeCreateIndex(Review.collection, { status: 1 }),
+    safeCreateIndex(CheckoutIntent.collection, { razorpayOrderId: 1, customerUserId: 1, status: 1 }),
+    safeCreateIndex(CheckoutIntent.collection, { status: 1, expiresAt: 1 }),
   ])
 }
 

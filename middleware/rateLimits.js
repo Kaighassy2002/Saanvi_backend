@@ -1,5 +1,8 @@
 const rateLimit = require('express-rate-limit')
 
+// Note: default in-memory store is per-process. For multi-instance production, set REDIS_URL
+// and swap to rate-limit-redis when horizontal scaling is required.
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
