@@ -80,11 +80,9 @@ const {
   adminCompleteLineReturn,
 } = require('./helpers/orderLineActions')
 const {
-  generateCourierAwb,
-  isShiprocketConfigured,
-  isDelhiveryConfigured,
-  trackingUrlForPartner,
+  getCourierHealth,
 } = require('./helpers/orderCourier')
+const { deliveryService } = require('../delivery')
 
 const MIN_PASSWORD_LEN = 8
 const OTP_LENGTH = 6
@@ -2151,7 +2149,7 @@ async function adminRmaAction(req, res) {
 
 async function adminGenerateCourierAwb(req, res) {
   const { id } = req.params
-  const partner = String(req.body?.partner || 'shiprocket').toLowerCase()
+  const partner = String(req.body?.partner || 'delhivery').toLowerCase()
   const doc = await Order.findOne({ publicId: id })
   if (!doc) {
     return res.status(404).json({ message: 'Order not found' })
@@ -2165,22 +2163,12 @@ async function adminGenerateCourierAwb(req, res) {
     defaultHsnCode: settings.defaultHsnCode,
   }
 
-  const result = await generateCourierAwb(doc.toObject(), store, partner)
-  const trackingUrl =
-    result.trackingUrl || trackingUrlForPartner(result.partner, result.awb)
-
-  doc.courierPartner = result.courierName || result.partner
-  doc.courierAwb = result.awb
-  doc.courierShipmentId = result.shipmentId || ''
-  doc.trackingNumber = result.awb || doc.trackingNumber
-  doc.trackingUrl = trackingUrl
-  doc.statusHistory = appendHistoryEntry(doc.statusHistory, {
-    status: doc.status,
-    paymentStatus: doc.paymentStatus,
-    note: `AWB generated via ${result.partner}: ${result.awb || 'pending'}`,
-    by: String(req.admin?.email || 'admin'),
+  const { courier: result } = await deliveryService.createShipmentForOrder({
+    orderDoc: doc,
+    store,
+    partner,
+    actorEmail: req.admin?.email,
   })
-  await doc.save()
 
   await logAudit({
     adminEmail: req.admin?.email,
@@ -2199,10 +2187,7 @@ async function adminGenerateCourierAwb(req, res) {
 }
 
 async function adminGetCourierStatus(_req, res) {
-  res.json({
-    shiprocket: isShiprocketConfigured(),
-    delhivery: isDelhiveryConfigured(),
-  })
+  res.json(getCourierHealth())
 }
 
 module.exports = {

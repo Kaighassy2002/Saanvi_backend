@@ -4,8 +4,7 @@ const { isCloudinaryConfigured } = require('../config/cloudinary')
 const { isRazorpayConfigured, getPublicKeyId } = require('./helpers/razorpay')
 const { isMailConfigured } = require('./helpers/otpEmail')
 const {
-  isShiprocketConfigured,
-  isDelhiveryConfigured,
+  getCourierHealth,
 } = require('./helpers/orderCourier')
 const {
   sanitizePromoBanners,
@@ -197,8 +196,7 @@ async function adminGetIntegrationsHealth(_req, res) {
         : null,
     },
     couriers: {
-      shiprocket: isShiprocketConfigured(),
-      delhivery: isDelhiveryConfigured(),
+      ...getCourierHealth(),
     },
   })
 }
