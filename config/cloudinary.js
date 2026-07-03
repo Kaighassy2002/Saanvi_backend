@@ -12,21 +12,26 @@ const CATEGORY_UPLOAD_TRANSFORM = 'c_fill,w_800,h_800,g_auto,f_auto,q_auto'
 /** Home promo banners — landscape crop */
 const PROMO_UPLOAD_TRANSFORM = 'c_fill,w_1200,h_800,g_auto,f_auto,q_auto'
 
+/** Homepage assets (hero, categories, promos) — Jewellery/Home in Media Library */
+function getHomeFolder() {
+  return process.env.CLOUDINARY_FOLDER_HOME || 'Jewellery/Home'
+}
+
 const UPLOAD_PURPOSES = {
   product: {
-    folder: () => process.env.CLOUDINARY_FOLDER || 'Home/Jewellery/Products',
+    folder: () => process.env.CLOUDINARY_FOLDER || 'Jewellery/Products',
     transformation: PRODUCT_UPLOAD_TRANSFORM,
   },
   hero: {
-    folder: () => process.env.CLOUDINARY_FOLDER_HERO || 'Home/Jewellery/hero',
+    folder: () => process.env.CLOUDINARY_FOLDER_HERO || getHomeFolder(),
     transformation: HERO_UPLOAD_TRANSFORM,
   },
   category: {
-    folder: () => process.env.CLOUDINARY_FOLDER_CATEGORY || 'Home/Jewellery/categories',
+    folder: () => process.env.CLOUDINARY_FOLDER_CATEGORY || getHomeFolder(),
     transformation: CATEGORY_UPLOAD_TRANSFORM,
   },
   promo: {
-    folder: () => process.env.CLOUDINARY_FOLDER_PROMO || 'Home/Jewellery/promo',
+    folder: () => process.env.CLOUDINARY_FOLDER_PROMO || getHomeFolder(),
     transformation: PROMO_UPLOAD_TRANSFORM,
   },
 }
@@ -42,10 +47,12 @@ function isCloudinaryConfigured() {
 function configureCloudinary() {
   if (!isCloudinaryConfigured()) return false
   cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET,
+    cloud_name: String(process.env.CLOUDINARY_CLOUD_NAME || '').trim(),
+    api_key: String(process.env.CLOUDINARY_API_KEY || '').trim(),
+    api_secret: String(process.env.CLOUDINARY_API_SECRET || '').trim(),
     secure: true,
+    signature_version: 1,
+    signature_algorithm: 'sha1',
   })
   return true
 }

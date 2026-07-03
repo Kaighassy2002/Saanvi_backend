@@ -41,7 +41,8 @@ cp .env.example .env
 | `CLOUDINARY_CLOUD_NAME` | Cond. | Cloudinary cloud name (admin product image uploads) |
 | `CLOUDINARY_API_KEY` | Cond. | Cloudinary API key |
 | `CLOUDINARY_API_SECRET` | Cond. | Cloudinary API secret (server only; never expose to the browser) |
-| `CLOUDINARY_FOLDER` | No | Upload folder in Cloudinary (default `Jewellery/Products`) |
+| `CLOUDINARY_FOLDER` | No | Product image folder (default `Jewellery/Products`) |
+| `CLOUDINARY_FOLDER_HOME` | No | Homepage assets folder — hero, categories, promos (default `Jewellery/Home`) |
 | `RAZORPAY_KEY_ID` | Cond. | Razorpay public key — required for online checkout |
 | `RAZORPAY_KEY_SECRET` | Cond. | Razorpay secret — server only; never expose to the browser |
 | `GOOGLE_CLIENT_ID` | Cond. | Google Sign-In (must match frontend `VITE_GOOGLE_CLIENT_ID`) |
@@ -129,7 +130,8 @@ Login: `POST /api/admin/auth/login` (admin credentials from DB / seed).
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/admin/dashboard/summary` | KPIs, recent orders |
-| `GET` | `/admin/upload/cloudinary-signature` | Signed params for browser upload |
+| `POST` | `/admin/upload/image` | Upload image to Cloudinary (multipart `file`, optional `?purpose=`) |
+| `GET` | `/admin/upload/cloudinary-signature` | Legacy signed params (prefer `POST /upload/image`) |
 
 #### Products
 

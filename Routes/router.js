@@ -160,6 +160,7 @@ admin.patch('/staff/:id', perm.staff, asyncHandler(adminStaffController.adminUpd
 admin.delete('/staff/:id', perm.staff, asyncHandler(adminStaffController.adminDeleteStaff))
 
 admin.get('/upload/cloudinary-signature', perm.catalog, asyncHandler(uploadController.adminGetCloudinarySignature))
+admin.post('/upload/image', perm.catalog, uploadController.uploadImageMiddleware, asyncHandler(uploadController.adminUploadImage))
 
 admin.get('/dashboard/summary', perm.dashboard, asyncHandler(dashboardController.adminDashboardSummary))
 
