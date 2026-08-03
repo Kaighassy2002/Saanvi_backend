@@ -16,8 +16,20 @@ const {
   sendOrderRefundEmail,
   sendAdminReturnRequestEmail,
 } = require('./helpers/otpEmail')
-const { codPaymentBlockedMessage } = require('./helpers/checkoutPolicy')
+const {
+  codPaymentBlockedMessage,
+  onlinePaymentViaPlaceOrderBlockedMessage,
+} = require('./helpers/checkoutPolicy')
 const { logAudit } = require('./helpers/auditLog')
+const { logSecurityEvent } = require('./helpers/securityLog')
+const { normalizeShipping, validateShipping } = require('./helpers/checkoutShipping')
+const { fulfillPaidCheckoutIntent } = require('./helpers/fulfillCheckoutIntent')
+const {
+  customerJwtSecret,
+  adminJwtSecret,
+  customerTokenExpiresIn,
+  adminTokenExpiresIn,
+} = require('../config/jwtSecrets')
 const {
   getEffectivePermissions,
   sanitizePermissions,
@@ -90,11 +102,27 @@ const {
 } = require('./helpers/orderCourier')
 const { deliveryService } = require('../delivery')
 const {
-  setCustomerAuthCookie,
-  setAdminAuthCookie,
   clearCustomerAuthCookie,
   clearAdminAuthCookie,
+  getRefreshToken,
+  setCustomerAuthCookie,
+  setAdminAuthCookie,
+  setCustomerRefreshCookie,
+  setAdminRefreshCookie,
+  clearCsrfCookie,
 } = require('../config/authCookies')
+const {
+  establishCustomerSession,
+  establishAdminSession,
+  signCustomerAccessToken,
+  signAdminAccessToken,
+} = require('./helpers/authSession')
+const {
+  refreshEnabled,
+  rotateRefreshToken,
+  revokeByRawToken,
+} = require('./helpers/refreshTokens')
+const { issueCsrfToken } = require('../middleware/csrf')
 const { captureServerError } = require('../config/sentry')
 const {
   createPendingCheckoutIntent,
@@ -130,8 +158,8 @@ function customerPublicJson(doc, { hasPassword } = {}) {
 function signCustomerToken(customer, secret) {
   return jwt.sign(
     { role: 'customer', sub: String(customer._id), email: customer.email },
-    secret,
-    { expiresIn: '7d' }
+    secret || customerJwtSecret(),
+    { algorithm: 'HS256', expiresIn: customerTokenExpiresIn() }
   )
 }
 
@@ -231,7 +259,7 @@ function storefrontCheckoutErrorMessage(err) {
 // --- storefront customer auth ---
 
 async function customerRegister(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -268,9 +296,8 @@ async function customerRegister(req, res) {
       createdAt,
       disabled: false,
     })
-    const token = signCustomerToken(customer, secret)
-    setCustomerAuthCookie(res, token)
-    res.status(201).json({ user: customerPublicJson(customer) })
+    const { csrfToken } = await establishCustomerSession(res, customer, req)
+    res.status(201).json({ user: customerPublicJson(customer), csrfToken })
   } catch (err) {
     if (err.code === 11000) {
       return res.status(409).json({ message: 'An account with this email already exists' })
@@ -280,7 +307,7 @@ async function customerRegister(req, res) {
 }
 
 async function customerLogin(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -293,6 +320,15 @@ async function customerLogin(req, res) {
   }
   const customer = await Customer.findOne({ email }).select('+passwordHash')
   if (!customer) {
+    await logSecurityEvent({
+      category: 'auth',
+      action: 'customer_login_failed',
+      severity: 'warning',
+      actorType: 'anonymous',
+      actorEmail: email,
+      details: { reason: 'not_found' },
+      req,
+    })
     return res.status(401).json({ message: 'Invalid email or password' })
   }
   if (customer.disabled) {
@@ -302,20 +338,69 @@ async function customerLogin(req, res) {
     return res.status(401).json({ message: 'No password set for this account' })
   }
   if (!(await bcrypt.compare(password, customer.passwordHash))) {
+    await logSecurityEvent({
+      category: 'auth',
+      action: 'customer_login_failed',
+      severity: 'warning',
+      actorType: 'anonymous',
+      actorEmail: email,
+      details: { reason: 'bad_password' },
+      req,
+    })
     return res.status(401).json({ message: 'Invalid email or password' })
   }
-  const token = signCustomerToken(customer, secret)
-  setCustomerAuthCookie(res, token)
-  res.json({ user: customerPublicJson(customer) })
+  const { csrfToken } = await establishCustomerSession(res, customer, req)
+  await logSecurityEvent({
+    category: 'auth',
+    action: 'customer_login_success',
+    severity: 'info',
+    actorType: 'customer',
+    actorId: String(customer._id),
+    actorEmail: customer.email,
+    details: {},
+    req,
+  })
+  res.json({ user: customerPublicJson(customer), csrfToken })
 }
 
-async function customerLogout(_req, res) {
+async function customerLogout(req, res) {
+  const rawRefresh = getRefreshToken(req, 'customer')
+  if (rawRefresh) {
+    await revokeByRawToken(rawRefresh, 'customer').catch(() => {})
+  }
   clearCustomerAuthCookie(res)
+  clearCsrfCookie(res)
   res.status(204).end()
 }
 
+async function customerRefreshSession(req, res) {
+  if (!refreshEnabled()) {
+    return res.status(503).json({ message: 'Refresh tokens are disabled' })
+  }
+  const raw = getRefreshToken(req, 'customer')
+  if (!raw) {
+    return res.status(401).json({ message: 'No refresh token' })
+  }
+  try {
+    const rotated = await rotateRefreshToken(raw, { role: 'customer', req })
+    const customer = await Customer.findById(rotated.subjectId)
+    if (!customer || customer.disabled) {
+      clearCustomerAuthCookie(res)
+      return res.status(401).json({ message: 'Account unavailable' })
+    }
+    const accessToken = signCustomerAccessToken(customer)
+    setCustomerAuthCookie(res, accessToken)
+    setCustomerRefreshCookie(res, rotated.rawToken)
+    const csrfToken = issueCsrfToken(res)
+    res.json({ ok: true, csrfToken, user: customerPublicJson(customer) })
+  } catch (err) {
+    clearCustomerAuthCookie(res)
+    return res.status(err.status || 401).json({ message: err.message || 'Refresh failed' })
+  }
+}
+
 async function customerGoogleLogin(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   const googleClientId = process.env.GOOGLE_CLIENT_ID
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
@@ -425,9 +510,8 @@ async function customerGoogleLogin(req, res) {
     return res.status(403).json({ message: 'Account is disabled' })
   }
 
-  const token = signCustomerToken(customer, secret)
-  setCustomerAuthCookie(res, token)
-  res.json({ user: customerPublicJson(customer) })
+  const { csrfToken } = await establishCustomerSession(res, customer, req)
+  res.json({ user: customerPublicJson(customer), csrfToken })
 }
 
 async function customerForgotPasswordRequest(req, res) {
@@ -465,7 +549,7 @@ async function customerForgotPasswordRequest(req, res) {
 }
 
 async function customerForgotPasswordVerifyOtp(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -507,14 +591,14 @@ async function customerForgotPasswordVerifyOtp(req, res) {
       otpId: String(otpDoc._id),
     },
     secret,
-    { expiresIn: RESET_TOKEN_EXPIRY }
+    { algorithm: 'HS256', expiresIn: RESET_TOKEN_EXPIRY }
   )
 
   res.json({ resetToken, expiresIn: RESET_TOKEN_EXPIRY })
 }
 
 async function customerForgotPasswordReset(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -529,7 +613,7 @@ async function customerForgotPasswordReset(req, res) {
 
   let payload
   try {
-    payload = jwt.verify(resetToken, secret)
+    payload = jwt.verify(resetToken, secret, { algorithms: ['HS256'] })
   } catch {
     return res.status(401).json({ message: 'Invalid or expired reset token' })
   }
@@ -642,7 +726,7 @@ async function customerPutWishlist(req, res) {
 // --- admin auth ---
 
 async function adminLogin(req, res) {
-  const secret = process.env.JWT_SECRET
+  const secret = adminJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -655,13 +739,32 @@ async function adminLogin(req, res) {
   }
   const admin = await Admin.findOne({ email })
   if (!admin || admin.disabled || !(await bcrypt.compare(password, admin.passwordHash))) {
+    await logSecurityEvent({
+      category: 'auth',
+      action: 'admin_login_failed',
+      severity: 'warning',
+      actorType: 'anonymous',
+      actorEmail: email,
+      details: {},
+      req,
+    })
     return res.status(401).json({ message: 'Invalid email or password' })
   }
   const role = admin.role || 'owner'
   const effectivePermissions = [...getEffectivePermissions(admin)]
-  const token = jwt.sign({ role, email: admin.email }, secret, { expiresIn: '7d' })
-  setAdminAuthCookie(res, token)
+  const { csrfToken } = await establishAdminSession(res, admin, req)
+  await logSecurityEvent({
+    category: 'auth',
+    action: 'admin_login_success',
+    severity: 'info',
+    actorType: 'admin',
+    actorId: String(admin._id || ''),
+    actorEmail: admin.email,
+    details: { role },
+    req,
+  })
   res.json({
+    csrfToken,
     user: {
       email: admin.email,
       role,
@@ -672,9 +775,57 @@ async function adminLogin(req, res) {
   })
 }
 
-async function adminLogout(_req, res) {
+async function adminLogout(req, res) {
+  const rawRefresh = getRefreshToken(req, 'admin')
+  if (rawRefresh) {
+    await revokeByRawToken(rawRefresh, 'admin').catch(() => {})
+  }
   clearAdminAuthCookie(res)
+  clearCsrfCookie(res)
   res.status(204).end()
+}
+
+async function adminRefreshSession(req, res) {
+  if (!refreshEnabled()) {
+    return res.status(503).json({ message: 'Refresh tokens are disabled' })
+  }
+  const raw = getRefreshToken(req, 'admin')
+  if (!raw) {
+    return res.status(401).json({ message: 'No refresh token' })
+  }
+  try {
+    const rotated = await rotateRefreshToken(raw, { role: 'admin', req })
+    let admin = isValidObjectId(rotated.subjectId)
+      ? await Admin.findById(rotated.subjectId)
+      : null
+    if (!admin && rotated.subjectEmail) {
+      admin = await Admin.findOne({ email: String(rotated.subjectEmail).toLowerCase() })
+    }
+    if (!admin || admin.disabled) {
+      clearAdminAuthCookie(res)
+      return res.status(401).json({ message: 'Account unavailable' })
+    }
+    const accessToken = signAdminAccessToken(admin)
+    setAdminAuthCookie(res, accessToken)
+    setAdminRefreshCookie(res, rotated.rawToken)
+    const csrfToken = issueCsrfToken(res)
+    const role = admin.role || 'owner'
+    const effectivePermissions = [...getEffectivePermissions(admin)]
+    res.json({
+      ok: true,
+      csrfToken,
+      user: {
+        email: admin.email,
+        role,
+        name: admin.name || '',
+        permissions: sanitizePermissions(admin.permissions),
+        effectivePermissions,
+      },
+    })
+  } catch (err) {
+    clearAdminAuthCookie(res)
+    return res.status(err.status || 401).json({ message: err.message || 'Refresh failed' })
+  }
 }
 
 async function adminGetMe(req, res) {
@@ -1210,15 +1361,25 @@ async function customerPlaceOrder(req, res) {
     return res.status(400).json({ message: errMsg })
   }
   const body = req.body || {}
-  const shipping = {
-    firstName: String(body.shipping.firstName).trim(),
-    lastName: String(body.shipping.lastName).trim(),
-    email: String(body.shipping.email).trim().toLowerCase(),
-    phone: String(body.shipping.phone).replace(/\D/g, ''),
-    address: String(body.shipping.address).trim(),
-    city: String(body.shipping.city).trim(),
-    state: String(body.shipping.state).trim(),
-    pincode: String(body.shipping.pincode).trim(),
+  // CRITICAL: online/razorpay must never mark paid via this endpoint (payment bypass).
+  const onlineBlocked = onlinePaymentViaPlaceOrderBlockedMessage(body.paymentMethod)
+  if (onlineBlocked) {
+    await logSecurityEvent({
+      category: 'fraud',
+      action: 'payment_bypass_blocked',
+      severity: 'critical',
+      actorType: 'customer',
+      actorId: String(req.customer?.sub || ''),
+      actorEmail: String(req.customer?.email || ''),
+      details: { paymentMethod: body.paymentMethod },
+      req,
+    })
+    return res.status(400).json({ message: onlineBlocked })
+  }
+  const shipping = normalizeShipping(body.shipping)
+  const shippingErr = validateShipping(shipping)
+  if (shippingErr) {
+    return res.status(400).json({ message: shippingErr })
   }
   const customerUserId = String(req.customer.sub)
   const settings = await getOrCreateSettings()
@@ -1226,17 +1387,31 @@ async function customerPlaceOrder(req, res) {
   if (codBlocked) {
     return res.status(400).json({ message: codBlocked })
   }
+  // Force COD semantics — never trust client paymentMethod aliases for paid status.
+  const codBody = { ...body, paymentMethod: 'cod' }
   let doc
   try {
     doc = await createPaidStorefrontOrder({
-      body,
+      body: codBody,
       shipping,
       customerUserId,
-      paymentStatus: normalizePaymentMethod(body.paymentMethod) === 'cod' ? 'pending' : 'paid',
+      paymentStatus: 'pending',
     })
   } catch (err) {
     return res.status(400).json({ message: storefrontCheckoutErrorMessage(err) })
   }
+  await logSecurityEvent({
+    category: 'order',
+    action: 'cod_order_placed',
+    severity: 'info',
+    actorType: 'customer',
+    actorId: customerUserId,
+    actorEmail: shipping.email,
+    entityType: 'order',
+    entityId: doc.publicId,
+    details: { total: doc.total },
+    req,
+  })
 
   sendOrderConfirmationEmail({
     to: shipping.email,
@@ -1277,6 +1452,11 @@ async function createRazorpayOrder(req, res) {
       return res.status(400).json({ message: 'Invalid product in cart' })
     }
   }
+  const shipping = normalizeShipping(body.shipping)
+  const shippingErr = validateShipping(shipping)
+  if (shippingErr) {
+    return res.status(400).json({ message: shippingErr })
+  }
   if (!isRazorpayConfigured()) {
     return res.status(503).json({ message: 'Online payment is not configured. Use Cash on Delivery or contact support.' })
   }
@@ -1286,7 +1466,12 @@ async function createRazorpayOrder(req, res) {
 
   let intent
   try {
-    const created = await createPendingCheckoutIntent({ customerUserId, items, couponCode })
+    const created = await createPendingCheckoutIntent({
+      customerUserId,
+      items,
+      couponCode,
+      shipping,
+    })
     intent = created.intent
     const { subtotal, shippingFee, total } = created.quote
     if (!verifyClientTotal(body.total, total)) {
@@ -1310,6 +1495,17 @@ async function createRazorpayOrder(req, res) {
       },
     })
     await attachRazorpayOrderToIntent(intent._id, razorpayOrder.id)
+    await logSecurityEvent({
+      category: 'checkout',
+      action: 'razorpay_order_created',
+      severity: 'info',
+      actorType: 'customer',
+      actorId: customerUserId,
+      entityType: 'checkoutIntent',
+      entityId: String(intent._id),
+      details: { razorpayOrderId: razorpayOrder.id, total },
+      req,
+    })
     res.json({
       razorpayOrderId: razorpayOrder.id,
       amount: razorpayOrder.amount,
@@ -1318,6 +1514,7 @@ async function createRazorpayOrder(req, res) {
       subtotal,
       shippingFee,
       total,
+      checkoutIntentId: String(intent._id),
     })
   } catch (err) {
     if (intent) {
@@ -1336,18 +1533,6 @@ async function createRazorpayOrder(req, res) {
 
 async function verifyRazorpayPayment(req, res) {
   const body = req.body || {}
-  const shipping = body.shipping || {}
-  const firstName = String(shipping.firstName || '').trim()
-  const lastName = String(shipping.lastName || '').trim()
-  const email = String(shipping.email || '').trim().toLowerCase()
-  const phone = String(shipping.phone || '').replace(/\D/g, '')
-  const address = String(shipping.address || '').trim()
-  const city = String(shipping.city || '').trim()
-  const state = String(shipping.state || '').trim()
-  const pincode = String(shipping.pincode || '').trim()
-  if (!firstName || !lastName || !email || !phone || !address || !city || !state || !/^\d{6}$/.test(pincode)) {
-    return res.status(400).json({ message: 'Valid shipping details required' })
-  }
   const razorpayOrderId = String(body.razorpayOrderId || '').trim()
   const razorpayPaymentId = String(body.razorpayPaymentId || '').trim()
   const razorpaySignature = String(body.razorpaySignature || '').trim()
@@ -1364,6 +1549,17 @@ async function verifyRazorpayPayment(req, res) {
       razorpaySignature,
     })
   ) {
+    await logSecurityEvent({
+      category: 'fraud',
+      action: 'razorpay_signature_invalid',
+      severity: 'critical',
+      actorType: 'customer',
+      actorId: String(req.customer?.sub || ''),
+      entityType: 'razorpayOrder',
+      entityId: razorpayOrderId,
+      details: { razorpayPaymentId },
+      req,
+    })
     return res.status(400).json({ message: 'Payment verification failed' })
   }
 
@@ -1373,8 +1569,30 @@ async function verifyRazorpayPayment(req, res) {
     const existingOrder = await Order.findOne({ publicId: existingPayment.orderPublicId })
     if (existingOrder) {
       if (String(existingOrder.customerUserId) !== customerUserId) {
+        await logSecurityEvent({
+          category: 'fraud',
+          action: 'payment_replay_cross_user',
+          severity: 'critical',
+          actorType: 'customer',
+          actorId: customerUserId,
+          entityType: 'payment',
+          entityId: razorpayPaymentId,
+          details: { orderPublicId: existingPayment.orderPublicId },
+          req,
+        })
         return res.status(409).json({ message: 'This payment has already been processed' })
       }
+      await logSecurityEvent({
+        category: 'payment',
+        action: 'payment_replay_idempotent',
+        severity: 'info',
+        actorType: 'customer',
+        actorId: customerUserId,
+        entityType: 'order',
+        entityId: existingOrder.publicId,
+        details: { razorpayPaymentId },
+        req,
+      })
       return res.status(200).json(orderToStorefrontJson(existingOrder))
     }
   }
@@ -1384,19 +1602,36 @@ async function verifyRazorpayPayment(req, res) {
   let paymentCapturedInr = null
   try {
     checkoutIntent = await findActiveCheckoutIntent({ razorpayOrderId, customerUserId })
-    const couponCode = String(body.couponCode || '').trim()
-
-    let expectedTotal
-    if (checkoutIntent) {
-      expectedTotal = checkoutIntent.total
-    } else {
-      // Backward compatible fallback for in-flight checkouts started before intent rollout.
-      const quote = await quoteVerifiedItems(body.items || [], couponCode)
-      expectedTotal = quote.total
+    // Fail closed: never re-quote cart after payment — intent is the only trusted snapshot.
+    if (!checkoutIntent) {
+      await logSecurityEvent({
+        category: 'fraud',
+        action: 'verify_without_intent',
+        severity: 'critical',
+        actorType: 'customer',
+        actorId: customerUserId,
+        entityType: 'razorpayOrder',
+        entityId: razorpayOrderId,
+        details: { razorpayPaymentId },
+        req,
+      })
+      return res.status(409).json({
+        message:
+          'Checkout session expired or was already completed. If money was deducted, it will be refunded automatically or contact support with your payment ID.',
+      })
     }
 
+    const expectedTotal = checkoutIntent.total
     if (!verifyClientTotal(body.total, expectedTotal)) {
       return res.status(400).json({ message: 'Order total mismatch. Please refresh cart and try again.' })
+    }
+
+    const shippingPayload = checkoutIntent.shipping
+      ? normalizeShipping(checkoutIntent.shipping)
+      : normalizeShipping(body.shipping)
+    const shippingErr = validateShipping(shippingPayload)
+    if (shippingErr) {
+      return res.status(400).json({ message: shippingErr })
     }
 
     const rpPayment = await assertRazorpayPaymentCaptured(rp, {
@@ -1406,55 +1641,29 @@ async function verifyRazorpayPayment(req, res) {
     })
     paymentCapturedInr = expectedTotal
 
-    const orderBody = {
-      items: body.items,
-      total: body.total,
-      paymentMethod: body.paymentMethod || 'razorpay',
-      couponCode,
-    }
-    const shippingPayload = { firstName, lastName, email, phone, address, city, state, pincode }
-
-    const doc = checkoutIntent
-      ? await createPaidStorefrontOrderFromIntent({
-          intent: checkoutIntent,
-          body: orderBody,
-          shipping: shippingPayload,
-          customerUserId,
-          paymentStatus: 'paid',
-          razorpayOrderId,
-          razorpayPaymentId,
-          instrument: String(rpPayment?.method || ''),
-        })
-      : await createPaidStorefrontOrder({
-          body: orderBody,
-          shipping: shippingPayload,
-          customerUserId,
-          paymentStatus: 'paid',
-          razorpayOrderId,
-          razorpayPaymentId,
-          instrument: String(rpPayment?.method || ''),
-        })
-
-    sendOrderConfirmationEmail({
-      to: email,
-      orderId: doc.publicId,
-      customerName: doc.customerName,
-      total: doc.total,
-      itemCount: doc.items.length,
-    }).catch((err) => {
-      console.error('Order confirmation email failed:', err.message)
+    const doc = await fulfillPaidCheckoutIntent({
+      intent: checkoutIntent,
+      shipping: shippingPayload,
+      customerUserId,
+      razorpayOrderId,
+      razorpayPaymentId,
+      instrument: String(rpPayment?.method || ''),
+      source: 'verify',
     })
-    sendAdminNewOrderEmail({
-      orderId: doc.publicId,
-      customerName: doc.customerName,
-      customerPhone: phone,
-      customerEmail: email,
-      total: doc.total,
-      itemCount: doc.items.length,
-      paymentMethod: doc.paymentMethod,
-    }).catch((err) => {
-      console.error('Admin new-order email failed:', err.message)
+
+    await logSecurityEvent({
+      category: 'payment',
+      action: 'payment_verified_order_created',
+      severity: 'info',
+      actorType: 'customer',
+      actorId: customerUserId,
+      actorEmail: shippingPayload.email,
+      entityType: 'order',
+      entityId: doc.publicId,
+      details: { razorpayPaymentId, razorpayOrderId, total: doc.total },
+      req,
     })
+
     res.status(201).json(orderToStorefrontJson(doc))
   } catch (err) {
     if (err?.code === 11000 && String(err?.message || '').includes('razorpayPaymentId')) {
@@ -1467,6 +1676,22 @@ async function verifyRazorpayPayment(req, res) {
       }
       return res.status(409).json({ message: 'This payment has already been processed' })
     }
+
+    await logSecurityEvent({
+      category: 'payment',
+      action: 'payment_verify_failed',
+      severity: 'warning',
+      actorType: 'customer',
+      actorId: customerUserId,
+      entityType: 'razorpayOrder',
+      entityId: razorpayOrderId,
+      details: {
+        razorpayPaymentId,
+        error: String(err?.message || '').slice(0, 240),
+        captured: paymentCapturedInr != null,
+      },
+      req,
+    })
 
     let refunded = false
     if (paymentCapturedInr != null && razorpayPaymentId) {
@@ -2258,8 +2483,26 @@ async function adminProcessRefund(req, res) {
   const payments = await listPaymentsForOrderPublicId(id)
   const razorpayPayment = payments.find((p) => p.provider === 'razorpay' && p.razorpayPaymentId)
 
+  const wantsSkipGateway = body.skipGateway === true
+  if (wantsSkipGateway && razorpayPayment && !isStaffManagerRole(req.admin?.role)) {
+    await logSecurityEvent({
+      category: 'admin',
+      action: 'refund_skip_gateway_denied',
+      severity: 'warning',
+      actorType: 'admin',
+      actorEmail: by,
+      entityType: 'order',
+      entityId: id,
+      details: { amount },
+      req,
+    })
+    return res.status(403).json({
+      message: 'Only owner/admin can mark Razorpay refunds without calling the payment gateway.',
+    })
+  }
+
   let refundRecord
-  if (razorpayPayment && body.skipGateway !== true) {
+  if (razorpayPayment && !wantsSkipGateway) {
     refundRecord = await processRazorpayRefund({
       order: doc,
       payment: razorpayPayment,
@@ -2269,6 +2512,19 @@ async function adminProcessRefund(req, res) {
       by,
     })
   } else {
+    if (wantsSkipGateway && razorpayPayment) {
+      await logSecurityEvent({
+        category: 'admin',
+        action: 'refund_skip_gateway',
+        severity: 'critical',
+        actorType: 'admin',
+        actorEmail: by,
+        entityType: 'order',
+        entityId: id,
+        details: { amount, reason, note },
+        req,
+      })
+    }
     refundRecord = {
       amount,
       currency: 'INR',
@@ -2432,6 +2688,7 @@ module.exports = {
   customerRegister,
   customerLogin,
   customerLogout,
+  customerRefreshSession,
   customerGoogleLogin,
   customerForgotPasswordRequest,
   customerForgotPasswordVerifyOtp,
@@ -2454,6 +2711,7 @@ module.exports = {
   customerReturnLineItem,
   adminLogin,
   adminLogout,
+  adminRefreshSession,
   adminGetMe,
   adminChangePassword,
   adminListUsers,

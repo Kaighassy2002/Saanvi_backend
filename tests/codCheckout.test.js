@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const {
   codPaymentBlockedMessage,
   normalizePaymentMethodKey,
+  onlinePaymentViaPlaceOrderBlockedMessage,
 } = require('../Controller/helpers/checkoutPolicy')
 
 describe('checkoutPolicy', () => {
@@ -27,5 +28,11 @@ describe('checkoutPolicy', () => {
 
   it('does not block razorpay when cod is disabled', () => {
     assert.equal(codPaymentBlockedMessage({ codEnabled: false }, 'razorpay'), null)
+  })
+
+  it('blocks placing paid online orders via generic place-order endpoint', () => {
+    assert.ok(onlinePaymentViaPlaceOrderBlockedMessage('razorpay'))
+    assert.ok(onlinePaymentViaPlaceOrderBlockedMessage('online'))
+    assert.equal(onlinePaymentViaPlaceOrderBlockedMessage('cod'), null)
   })
 })

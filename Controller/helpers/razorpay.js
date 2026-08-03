@@ -1,5 +1,6 @@
 const crypto = require('crypto')
 const Razorpay = require('razorpay')
+const { timingSafeEqualString } = require('./cryptoSafe')
 
 const RAZORPAY_CURRENCY = 'INR'
 
@@ -20,14 +21,36 @@ function razorpayClient() {
   return new Razorpay({ key_id: keyId, key_secret: keySecret })
 }
 
+/** @deprecated use timingSafeEqualString from cryptoSafe — kept for tests */
+function timingSafeEqualHex(a, b) {
+  return timingSafeEqualString(a, b)
+}
+
 function verifyPaymentSignature({ razorpayOrderId, razorpayPaymentId, razorpaySignature }) {
   const keySecret = String(process.env.RAZORPAY_KEY_SECRET || '').trim()
   if (!keySecret) return false
-  const digest = crypto
-    .createHmac('sha256', keySecret)
-    .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-    .digest('hex')
-  return digest === razorpaySignature
+  const orderId = String(razorpayOrderId || '').trim()
+  const paymentId = String(razorpayPaymentId || '').trim()
+  const signature = String(razorpaySignature || '').trim()
+  if (!orderId || !paymentId || !signature) return false
+
+  const digest = crypto.createHmac('sha256', keySecret).update(`${orderId}|${paymentId}`).digest('hex')
+  return timingSafeEqualString(digest, signature)
+}
+
+/**
+ * Verify Razorpay webhook signature.
+ * Header: X-Razorpay-Signature = HMAC-SHA256(rawBody, webhookSecret)
+ */
+function verifyWebhookSignature(rawBody, signatureHeader) {
+  const webhookSecret = String(process.env.RAZORPAY_WEBHOOK_SECRET || '').trim()
+  if (!webhookSecret) return false
+  const signature = String(signatureHeader || '').trim()
+  if (!signature || rawBody == null) return false
+
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody), 'utf8')
+  const digest = crypto.createHmac('sha256', webhookSecret).update(body).digest('hex')
+  return timingSafeEqualString(digest, signature)
 }
 
 /** Confirm payment is captured and amount matches storefront total (rupees). */
@@ -53,5 +76,7 @@ module.exports = {
   getPublicKeyId,
   razorpayClient,
   verifyPaymentSignature,
+  verifyWebhookSignature,
   assertRazorpayPaymentCaptured,
+  timingSafeEqualHex,
 }

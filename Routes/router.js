@@ -1,5 +1,4 @@
 const express = require('express')
-const mongoose = require('mongoose')
 const { clientErrorMessage } = require('../Controller/helpers/httpError')
 const { captureServerError } = require('../config/sentry')
 const { requireAdmin } = require('../middleware/authAdmin')
@@ -29,15 +28,20 @@ const {
   orderLimiter,
   adminApiLimiter,
   publicApiLimiter,
+  paymentLimiter,
+  refreshLimiter,
 } = require('../middleware/rateLimits')
 const { cachePublic } = require('../middleware/cachePublic')
+const { csrfProtection, getCsrfToken } = require('../middleware/csrf')
+const healthController = require('../Controller/healthController')
 
 const router = express.Router()
 
-router.get('/health', (_req, res) => {
-  const dbOk = mongoose.connection.readyState === 1
-  res.status(dbOk ? 200 : 503).json({ ok: dbOk })
-})
+// CSRF for cookie-authenticated mutating requests (Origin + synchronizer token)
+router.use(csrfProtection)
+
+router.get('/health', asyncHandler(healthController.getHealth))
+router.get('/auth/csrf', publicApiLimiter, asyncHandler(getCsrfToken))
 
 router.get('/sitemap.xml', cachePublic(3600), publicApiLimiter, asyncHandler(seoController.getSitemapXml))
 
@@ -108,6 +112,7 @@ router.get('/payments/razorpay-config', publicApiLimiter, asyncHandler(paymentsC
 router.post('/auth/register', authLimiter, asyncHandler(userController.customerRegister))
 router.post('/auth/login', authLimiter, asyncHandler(userController.customerLogin))
 router.post('/auth/logout', asyncHandler(userController.customerLogout))
+router.post('/auth/refresh', refreshLimiter, asyncHandler(userController.customerRefreshSession))
 router.post('/auth/google', authLimiter, asyncHandler(userController.customerGoogleLogin))
 router.post('/auth/forgot-password/request', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordRequest))
 router.post('/auth/forgot-password/verify', forgotPasswordLimiter, asyncHandler(userController.customerForgotPasswordVerifyOtp))
@@ -127,12 +132,13 @@ router.post('/auth/orders/:id/items/:lineId/return-request', requireCustomer, as
 
 router.post('/orders/quote', orderLimiter, requireCustomer, asyncHandler(userController.customerQuoteCheckout))
 router.post('/orders', orderLimiter, requireCustomer, asyncHandler(userController.customerPlaceOrder))
-router.post('/orders/razorpay-order', orderLimiter, requireCustomer, asyncHandler(userController.createRazorpayOrder))
-router.post('/orders/razorpay-verify', orderLimiter, requireCustomer, asyncHandler(userController.verifyRazorpayPayment))
+router.post('/orders/razorpay-order', paymentLimiter, requireCustomer, asyncHandler(userController.createRazorpayOrder))
+router.post('/orders/razorpay-verify', paymentLimiter, requireCustomer, asyncHandler(userController.verifyRazorpayPayment))
 
 router.post('/coupons/quote', orderLimiter, requireCustomer, asyncHandler(couponController.storefrontQuoteCoupon))
 
 router.post('/admin/auth/login', authLimiter, asyncHandler(userController.adminLogin))
+router.post('/admin/auth/refresh', refreshLimiter, asyncHandler(userController.adminRefreshSession))
 
 const admin = express.Router()
 admin.use(adminApiLimiter)

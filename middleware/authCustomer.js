@@ -1,9 +1,11 @@
 const jwt = require('jsonwebtoken')
 const Customer = require('../Models/Customer')
 const { getBearerToken } = require('../config/authCookies')
+const { customerJwtSecret, VERIFY_OPTS } = require('../config/jwtSecrets')
+const { logSecurityEvent } = require('../Controller/helpers/securityLog')
 
 async function requireCustomer(req, res, next) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) {
     return res.status(500).json({ message: 'Server missing JWT_SECRET' })
   }
@@ -12,9 +14,17 @@ async function requireCustomer(req, res, next) {
     return res.status(401).json({ message: 'Unauthorized' })
   }
   try {
-    const payload = jwt.verify(token, secret)
+    const payload = jwt.verify(token, secret, VERIFY_OPTS)
     const role = String(payload.role || '').toLowerCase()
     if (role !== 'customer') {
+      await logSecurityEvent({
+        category: 'auth',
+        action: 'customer_role_mismatch',
+        severity: 'warning',
+        actorType: 'anonymous',
+        details: { role },
+        req,
+      })
       return res.status(403).json({ message: 'Forbidden' })
     }
     const sub = payload.sub

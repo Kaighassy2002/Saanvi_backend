@@ -1,15 +1,16 @@
 const jwt = require('jsonwebtoken')
 const Customer = require('../Models/Customer')
 const { getBearerToken } = require('../config/authCookies')
+const { customerJwtSecret, VERIFY_OPTS } = require('../config/jwtSecrets')
 
 /** Sets req.customer when a valid customer JWT is present; otherwise continues. */
 async function optionalCustomer(req, _res, next) {
-  const secret = process.env.JWT_SECRET
+  const secret = customerJwtSecret()
   if (!secret) return next()
   const token = getBearerToken(req, 'customer')
   if (!token) return next()
   try {
-    const payload = jwt.verify(token, secret)
+    const payload = jwt.verify(token, secret, VERIFY_OPTS)
     if (String(payload.role || '').toLowerCase() !== 'customer' || !payload.sub) {
       return next()
     }

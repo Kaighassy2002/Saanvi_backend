@@ -19,7 +19,21 @@ function codPaymentBlockedMessage(settings, paymentMethod) {
   return null
 }
 
+/**
+ * Online / Razorpay orders must never be created via POST /orders.
+ * They require CheckoutIntent + Razorpay capture verification (or webhook).
+ * @returns {string|null}
+ */
+function onlinePaymentViaPlaceOrderBlockedMessage(paymentMethod) {
+  const method = normalizePaymentMethodKey(paymentMethod)
+  if (method === 'razorpay') {
+    return 'Online payment orders must be completed through the secure payment flow.'
+  }
+  return null
+}
+
 module.exports = {
   normalizePaymentMethodKey,
   codPaymentBlockedMessage,
+  onlinePaymentViaPlaceOrderBlockedMessage,
 }

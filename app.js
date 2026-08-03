@@ -8,9 +8,11 @@ const compression = require('compression')
 const cookieParser = require('cookie-parser')
 const mongoSanitize = require('express-mongo-sanitize')
 const apiRouter = require('./Routes/router')
+const webhooksController = require('./Controller/webhooksController')
 const { isProduction } = require('./config/isProduction')
 const { clientErrorMessage } = require('./Controller/helpers/httpError')
 const { setupExpressErrorHandler } = require('./config/sentry')
+const { asyncHandler } = require('./Controller/helpers/asyncHandler')
 
 function allowedOriginsFromEnv() {
   const raw = String(process.env.CORS_ALLOWED_ORIGINS || '').trim()
@@ -24,14 +26,29 @@ function allowedOriginsFromEnv() {
 function createApp() {
   const app = express()
   app.set('trust proxy', 1)
-  // API serves JSON only — disable CSP here; set CSP on the static frontend host.
+
   app.use(
     helmet({
       contentSecurityPolicy: false,
       crossOriginResourcePolicy: { policy: 'cross-origin' },
+      crossOriginEmbedderPolicy: false,
+      referrerPolicy: { policy: 'no-referrer' },
+      hsts: isProduction()
+        ? { maxAge: 31536000, includeSubDomains: true, preload: true }
+        : false,
+      permittedCrossDomainPolicies: { permittedPolicies: 'none' },
     })
   )
   app.use(compression())
+
+  // Razorpay webhooks: raw body + no browser CORS (server-to-server, no Origin).
+  // Mount before cookieParser/cors/json so signature covers the exact payload.
+  app.post(
+    '/api/webhooks/razorpay',
+    express.raw({ type: 'application/json', limit: '256kb' }),
+    asyncHandler(webhooksController.razorpayWebhook)
+  )
+
   app.use(cookieParser())
 
   const allowedOrigins = allowedOriginsFromEnv()
@@ -39,7 +56,6 @@ function createApp() {
     cors({
       credentials: true,
       origin(origin, cb) {
-        // Block missing Origin in production (non-browser clients should use server-to-server).
         if (!origin) {
           return isProduction() ? cb(new Error('CORS blocked for origin')) : cb(null, true)
         }
@@ -54,6 +70,7 @@ function createApp() {
       },
     })
   )
+
   app.use(express.json({ limit: '1mb' }))
   // Express 5 makes req.query read-only; express-mongo-sanitize must replace it with a mutable copy.
   app.use((req, _res, next) => {
@@ -65,7 +82,6 @@ function createApp() {
     })
     next()
   })
-  // Strip MongoDB operator keys from user input (NoSQL injection defense-in-depth).
   app.use(mongoSanitize({ replaceWith: '_' }))
   app.use('/api', apiRouter)
 

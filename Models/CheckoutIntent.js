@@ -20,6 +20,8 @@ const checkoutIntentSchema = new mongoose.Schema({
   couponDiscount: { type: Number, default: 0 },
   couponId: { type: String, default: '' },
   total: { type: Number, default: 0 },
+  /** Snapshot of shipping collected before Razorpay payment (required for webhook fulfillment). */
+  shipping: { type: mongoose.Schema.Types.Mixed, default: null },
   /** Stock reservation undo payloads from checkoutQuote (released on expiry/failure). */
   reservations: { type: [mongoose.Schema.Types.Mixed], default: [] },
   expiresAt: { type: Date, required: true, index: true },

@@ -31,8 +31,9 @@ async function releaseCheckoutIntent(intent, nextStatus = 'expired') {
 
 /**
  * Quote cart with stock reservation and persist a checkout intent (before Razorpay order id exists).
+ * Shipping snapshot enables webhook-side order fulfillment without trusting client replay.
  */
-async function createPendingCheckoutIntent({ customerUserId, items, couponCode = '' }) {
+async function createPendingCheckoutIntent({ customerUserId, items, couponCode = '', shipping = null }) {
   await cleanupExpiredCheckoutIntents()
 
   const quote = await quoteCheckout(items, { decrement: true, couponCode })
@@ -48,11 +49,18 @@ async function createPendingCheckoutIntent({ customerUserId, items, couponCode =
     couponDiscount: quote.couponDiscount,
     couponId: quote.couponId ? String(quote.couponId) : '',
     total: quote.total,
+    shipping: shipping || null,
     reservations: quote.reservations || [],
     expiresAt,
   })
 
   return { intent, quote }
+}
+
+async function findCheckoutIntentByRazorpayOrderId(razorpayOrderId) {
+  const rpId = String(razorpayOrderId || '').trim()
+  if (!rpId) return null
+  return CheckoutIntent.findOne({ razorpayOrderId: rpId, status: 'pending' })
 }
 
 async function attachRazorpayOrderToIntent(intentId, razorpayOrderId) {
@@ -107,6 +115,7 @@ module.exports = {
   createPendingCheckoutIntent,
   attachRazorpayOrderToIntent,
   findActiveCheckoutIntent,
+  findCheckoutIntentByRazorpayOrderId,
   consumeCheckoutIntent,
   failCheckoutIntent,
 }
