@@ -4,11 +4,11 @@ const { safeInternalPath } = require('../Controller/helpers/safePath')
 
 describe('safeInternalPath', () => {
   it('blocks javascript: URLs', () => {
-    assert.equal(safeInternalPath('javascript:alert(1)'), '/collections')
+    assert.equal(safeInternalPath('javascript:alert(1)'), '/shop')
   })
 
   it('allows internal paths', () => {
-    assert.equal(safeInternalPath('/collections?category=Ring'), '/collections?category=Ring')
+    assert.equal(safeInternalPath('/shop?category=Ring'), '/shop?category=Ring')
   })
 
   it('allows https URLs', () => {
@@ -16,6 +16,6 @@ describe('safeInternalPath', () => {
   })
 
   it('blocks protocol-relative URLs', () => {
-    assert.equal(safeInternalPath('//evil.com'), '/collections')
+    assert.equal(safeInternalPath('//evil.com'), '/shop')
   })
 })

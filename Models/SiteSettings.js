@@ -86,7 +86,7 @@ const siteSettingsSchema = new mongoose.Schema({
   announcementExtraMessage: { type: String, default: '' },
   announcementMessage: { type: String, default: '' },
   announcementLinkLabel: { type: String, default: '' },
-  announcementLinkUrl: { type: String, default: '/collections' },
+  announcementLinkUrl: { type: String, default: '/shop' },
   announcementShowIcon: { type: Boolean, default: true },
   instagramUrl: { type: String, default: 'https://instagram.com/aashmikadesigns' },
   shippingFee: { type: Number, min: 0 },

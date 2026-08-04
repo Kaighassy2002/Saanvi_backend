@@ -15,18 +15,18 @@ const DEFAULT_HOME_SECTIONS = {
     overline: 'Shop by mood',
     title: 'Popular Categories',
     buttonLabel: 'Shop all categories',
-    buttonLink: '/collections',
+    buttonLink: '/shop',
   },
-  mobilePromos: { title: 'Offers for you', linkLabel: 'See all', linkUrl: '/collections' },
+  mobilePromos: { title: 'Offers for you', linkLabel: 'See all', linkUrl: '/shop' },
   mobileTrending: { title: 'Trending now', linkLabel: 'View all' },
   mobileCategories: {
     title: 'Shop by category',
     linkLabel: 'All',
-    linkUrl: '/collections',
+    linkUrl: '/shop',
   },
   mobileQuickShop: {
     searchPlaceholder: 'Search necklaces, rings, bridal sets…',
-    chips: [{ label: 'New arrivals', link: '/collections?sort=latest', highlight: true }],
+    chips: [{ label: 'New arrivals', link: '/shop?sort=latest', highlight: true }],
   },
 }
 
@@ -35,21 +35,21 @@ const DEFAULT_PROMO_BANNERS = [
     label: 'Flat 30% off',
     title: 'Glowing gold rings',
     image: '',
-    link: '/collections?category=Ring',
+    link: '/shop?category=Ring',
     buttonText: 'Shop now',
   },
   {
     label: 'Special offers',
     title: 'Women gold bracelet',
     image: '',
-    link: '/collections?category=Bracelets',
+    link: '/shop?category=Bracelets',
     buttonText: 'Shop now',
   },
   {
     label: 'Flat 20% off',
     title: 'Trendy bridal sets',
     image: '',
-    link: '/collections?category=Bridal%20Set',
+    link: '/shop?category=Bridal%20Set',
     buttonText: 'Shop now',
   },
 ]
@@ -75,7 +75,7 @@ function sanitizePromoBanners(input) {
       label: String(b?.label || '').trim(),
       title: String(b?.title || '').trim(),
       image: String(b?.image || '').trim(),
-      link: safeInternalPath(b?.link, '/collections'),
+      link: safeInternalPath(b?.link, '/shop'),
       buttonText: String(b?.buttonText || '').trim() || 'Shop now',
     }))
     .filter((b) => hasContent(b, ['image', 'title']))
@@ -89,7 +89,7 @@ function sanitizeHeroSlides(input) {
       tag: String(s?.tag || '').trim(),
       title: String(s?.title || '').trim(),
       subtitle: String(s?.subtitle || '').trim(),
-      link: safeInternalPath(s?.link, '/collections'),
+      link: safeInternalPath(s?.link, '/shop'),
     }))
     .filter((s) => s.image || s.title)
 }
@@ -125,7 +125,7 @@ function sanitizeHomeSections(input) {
     ? src.mobileQuickShop.chips
         .map((c) => ({
           label: String(c?.label || '').trim(),
-          link: safeInternalPath(c?.link, '/collections'),
+          link: safeInternalPath(c?.link, '/shop'),
           highlight: !!c?.highlight,
         }))
         .filter((c) => c.label)
@@ -150,7 +150,7 @@ function resolvePromoBanners(stored, fallback = DEFAULT_PROMO_BANNERS) {
     label: b.label || '',
     title: b.title || '',
     image: b.image || '',
-    link: b.link || '/collections',
+    link: b.link || '/shop',
     buttonText: b.buttonText || 'Shop now',
   }))
 }

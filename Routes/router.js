@@ -137,6 +137,20 @@ router.post('/orders/razorpay-verify', paymentLimiter, requireCustomer, asyncHan
 
 router.post('/coupons/quote', orderLimiter, requireCustomer, asyncHandler(couponController.storefrontQuoteCoupon))
 
+router.get('/collections', publicApiLimiter, cachePublic(30), asyncHandler(collectionController.publicListCollections))
+router.get(
+  '/collections/featured',
+  publicApiLimiter,
+  cachePublic(30),
+  asyncHandler(collectionController.publicFeaturedCollections)
+)
+router.get(
+  '/collections/:slug',
+  publicApiLimiter,
+  cachePublic(30),
+  asyncHandler(collectionController.publicGetCollectionBySlug)
+)
+
 router.post('/admin/auth/login', authLimiter, asyncHandler(userController.adminLogin))
 router.post('/admin/auth/refresh', refreshLimiter, asyncHandler(userController.adminRefreshSession))
 
@@ -192,6 +206,11 @@ admin.patch('/catalog/categories/:id', perm.catalog, asyncHandler(categoryContro
 admin.delete('/catalog/categories/:id', perm.catalog, asyncHandler(categoryController.adminDeleteCategory))
 
 admin.get('/catalog/collections', perm.catalog, asyncHandler(collectionController.adminListCollections))
+admin.get(
+  '/catalog/collections/analytics',
+  perm.catalog,
+  asyncHandler(collectionController.adminCollectionAnalytics)
+)
 admin.post('/catalog/collections', perm.catalog, asyncHandler(collectionController.adminCreateCollection))
 admin.patch('/catalog/collections/:id', perm.catalog, asyncHandler(collectionController.adminUpdateCollection))
 admin.delete('/catalog/collections/:id', perm.catalog, asyncHandler(collectionController.adminDeleteCollection))

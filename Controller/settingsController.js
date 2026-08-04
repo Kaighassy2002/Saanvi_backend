@@ -20,7 +20,7 @@ function announcementFieldsFromDoc(settings) {
     announcementEnabled: settings.announcementEnabled !== false,
     announcementExtraMessage: settings.announcementExtraMessage || '',
     announcementMessage: settings.announcementMessage || '',
-    announcementLinkUrl: settings.announcementLinkUrl || '/collections',
+    announcementLinkUrl: settings.announcementLinkUrl || '/shop',
     announcementShowIcon: settings.announcementShowIcon !== false,
   }
   if (Object.prototype.hasOwnProperty.call(doc, 'announcementLinkLabel')) {
@@ -50,6 +50,7 @@ async function getPublicStoreSettings(_req, res) {
     shipping: client.shipping,
     heroSlides: client.heroSlides,
     featuredProductIds: client.featuredProductIds,
+    featuredCollectionIds: client.featuredCollectionIds,
     homeCategoryImages: client.homeCategoryImages,
     promoBanners: client.promoBanners,
     homeServices: client.homeServices,
@@ -109,6 +110,7 @@ function settingsToClient(settings) {
     shipping,
     newArrivalProductIds: settings.newArrivalProductIds || [],
     featuredProductIds: settings.featuredProductIds || [],
+    featuredCollectionIds: settings.featuredCollectionIds || [],
     heroSlides: settings.heroSlides || [],
     homeCategoryImages: settings.homeCategoryImages || [],
     promoBanners: settings.promoBanners || [],
@@ -159,10 +161,16 @@ async function adminUpdateSettings(req, res) {
   if (body.announcementEnabled !== undefined) settings.announcementEnabled = !!body.announcementEnabled
   if (body.announcementShowIcon !== undefined) settings.announcementShowIcon = !!body.announcementShowIcon
   if (body.announcementLinkUrl !== undefined) {
-    settings.announcementLinkUrl = safeInternalPath(body.announcementLinkUrl, '/collections')
+    settings.announcementLinkUrl = safeInternalPath(body.announcementLinkUrl, '/shop')
   }
   if (body.newArrivalProductIds !== undefined) settings.newArrivalProductIds = body.newArrivalProductIds.map(String)
   if (body.featuredProductIds !== undefined) settings.featuredProductIds = body.featuredProductIds.map(String)
+  if (body.featuredCollectionIds !== undefined) {
+    settings.featuredCollectionIds = body.featuredCollectionIds
+      .map(String)
+      .filter(Boolean)
+      .slice(0, 3)
+  }
   if (body.heroSlides !== undefined) settings.heroSlides = sanitizeHeroSlides(body.heroSlides)
   if (body.homeCategoryImages !== undefined) settings.homeCategoryImages = body.homeCategoryImages
   if (body.promoBanners !== undefined) settings.promoBanners = sanitizePromoBanners(body.promoBanners)

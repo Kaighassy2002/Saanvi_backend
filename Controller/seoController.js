@@ -1,5 +1,7 @@
 const Product = require('../Models/Product')
+const Collection = require('../Models/Collection')
 const { publishDueProducts } = require('./helpers/scheduledPublish')
+const { storefrontVisibilityFilter } = require('./collectionController')
 
 function storefrontBaseUrl() {
   const raw =
@@ -43,20 +45,34 @@ async function getSitemapXml(_req, res) {
 
   const staticPages = [
     { path: '/', changefreq: 'weekly', priority: '1.0' },
-    { path: '/collections', changefreq: 'daily', priority: '0.9' },
+    { path: '/shop', changefreq: 'daily', priority: '0.9' },
     { path: '/contact', changefreq: 'monthly', priority: '0.6' },
     { path: '/shipping', changefreq: 'monthly', priority: '0.5' },
     { path: '/returns', changefreq: 'monthly', priority: '0.5' },
     { path: '/privacy-policy', changefreq: 'yearly', priority: '0.4' },
   ]
 
-  const products = await Product.find({ published: true })
-    .select({ updatedAt: 1, createdAt: 1 })
-    .sort({ updatedAt: -1 })
-    .lean()
+  const now = new Date()
+  const [products, collections] = await Promise.all([
+    Product.find({ published: true })
+      .select({ updatedAt: 1, createdAt: 1 })
+      .sort({ updatedAt: -1 })
+      .lean(),
+    Collection.find(storefrontVisibilityFilter(now))
+      .select({ slug: 1, updatedAt: 1, createdAt: 1 })
+      .sort({ sortOrder: 1, name: 1 })
+      .lean(),
+  ])
 
   const entries = [
     ...staticPages.map((page) => urlEntry(`${base}${page.path}`, page)),
+    ...collections.map((doc) =>
+      urlEntry(`${base}/collections/${encodeURIComponent(doc.slug)}`, {
+        changefreq: 'weekly',
+        priority: '0.8',
+        lastmod: toLastmod(doc.updatedAt || doc.createdAt),
+      })
+    ),
     ...products.map((doc) =>
       urlEntry(`${base}/product/${String(doc._id)}`, {
         changefreq: 'weekly',

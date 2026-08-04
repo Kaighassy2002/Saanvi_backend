@@ -1,5 +1,5 @@
 /** Block javascript:/data: URLs in admin-controlled storefront links (stored XSS). */
-function safeInternalPath(url, fallback = '/collections') {
+function safeInternalPath(url, fallback = '/shop') {
   const s = String(url || '').trim()
   if (!s) return fallback
   if (/^(javascript|data|vbscript):/i.test(s)) return fallback
